@@ -87,16 +87,19 @@ def add_table(slide, table_name, df: pd.DataFrame):
     # Otherwise, add a new table
     rows, cols = len(df) + 1, len(df.columns)
     left, top, width, height = Inches(1), Inches(1.5), Inches(8), Inches(1 + 0.3 * rows)
-    table_shape = slide.shapes.add_table(rows, cols, left, top, width, height).table
+    table_shape = slide.shapes.add_table(rows, cols, left, top, width, height)
+    table = table_shape.table
     for j, col in enumerate(df.columns):
-        table_shape.cell(0, j).text = str(col)
+        table.cell(0, j).text = str(col)
     for i in range(len(df)):
         for j in range(len(df.columns)):
-            table_shape.cell(i+1, j).text = str(df.iloc[i, j])
-    table_shape._element.graphicFrame.ln = None
-    table_shape._element.graphicFrame.shadow = None
-    table_shape._element.graphicFrame.effectLst = None
-    table_shape._element.graphicFrame.scene3d = None
+            table.cell(i+1, j).text = str(df.iloc[i, j])
+
+    graphic_frame = table_shape._element
+    graphic_frame.graphicFrame.ln = None
+    graphic_frame.graphicFrame.shadow = None
+    graphic_frame.graphicFrame.effectLst = None
+    graphic_frame.graphicFrame.scene3d = None
     return True
 
 def build_pptx_from_template(template_bytes, df):
@@ -168,7 +171,7 @@ def generate_deck(n_clicks, data_contents, data_name, pptx_contents, pptx_name):
         template_bytes = base64.b64decode(pptx_b64)
 
         pptx_bytes = build_pptx_from_template(template_bytes, df)
-        return dcc.send_bytes(lambda _: _, "deck.pptx"), "Building deck..."
+        return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
     except Exception as e:
         return no_update, f"Error: {e}"
