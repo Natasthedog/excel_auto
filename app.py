@@ -31,9 +31,14 @@ def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
     chart_shape = None
     for shape in slide.shapes:
-        if hasattr(shape, "name") and shape.name == chart_name and shape.has_chart:
-            chart_shape = shape
-            break
+        if getattr(shape, "name", None) == chart_name:
+            if shape.has_chart:
+                chart_shape = shape
+                break
+            else:
+                # Remove placeholder artifacts that aren't real charts
+                sp = shape._element
+                sp.getparent().remove(sp)
 
     cd = ChartData()
     cd.categories = categories
@@ -45,11 +50,19 @@ def update_or_add_column_chart(slide, chart_name, categories, series_dict):
         chart_shape.chart.replace_data(cd)
         return chart_shape
     else:
+        # Remove any stale shapes with the target name before adding a new chart
+        for shape in list(slide.shapes):
+            if getattr(shape, "name", None) == chart_name:
+                sp = shape._element
+                sp.getparent().remove(sp)
+
         # Insert a new chart (fallback)
         left, top, width, height = Inches(1), Inches(2), Inches(8), Inches(4.5)
-        chart = slide.shapes.add_chart(
+        chart_shape = slide.shapes.add_chart(
             XL_CHART_TYPE.COLUMN_CLUSTERED, left, top, width, height, cd
-        ).chart
+        )
+        chart_shape.name = chart_name
+        chart = chart_shape.chart
         # Light touch formatting; rely on template/theme for styling
         chart.has_legend = True
         return chart
@@ -68,26 +81,36 @@ def set_text_by_name(slide, shape_name, text):
 
 def add_table(slide, table_name, df: pd.DataFrame):
     # If there is a placeholder shape with that name and it's a table, try to fill it.
-    for shape in slide.shapes:
-        if getattr(shape, "name", None) == table_name and shape.has_table:
-            tbl = shape.table
-            # Resize (simple): write headers to row 0, then rows afterward if room allows
-            n_rows = min(len(df) + 1, tbl.rows.__len__())
-            n_cols = min(len(df.columns), tbl.columns.__len__())
-            # headers
-            for j, col in enumerate(df.columns[:n_cols]):
-                cell = tbl.cell(0, j)
-                cell.text = str(col)
-            # cells
-            for i in range(1, n_rows):
-                for j in range(n_cols):
-                    tbl.cell(i, j).text = str(df.iloc[i-1, j])
-            return True
+    for shape in list(slide.shapes):
+        if getattr(shape, "name", None) == table_name:
+            if shape.has_table:
+                tbl = shape.table
+                # Resize (simple): write headers to row 0, then rows afterward if room allows
+                n_rows = min(len(df) + 1, tbl.rows.__len__())
+                n_cols = min(len(df.columns), tbl.columns.__len__())
+                # headers
+                for j, col in enumerate(df.columns[:n_cols]):
+                    cell = tbl.cell(0, j)
+                    cell.text = str(col)
+                # cells
+                for i in range(1, n_rows):
+                    for j in range(n_cols):
+                        tbl.cell(i, j).text = str(df.iloc[i-1, j])
+                # Clear any leftover rows beyond the populated range
+                for i in range(n_rows, tbl.rows.__len__()):
+                    for j in range(tbl.columns.__len__()):
+                        tbl.cell(i, j).text = ""
+                return True
+            else:
+                # Remove non-table placeholders so we can insert a fresh table
+                sp = shape._element
+                sp.getparent().remove(sp)
 
     # Otherwise, add a new table
     rows, cols = len(df) + 1, len(df.columns)
     left, top, width, height = Inches(1), Inches(1.5), Inches(8), Inches(1 + 0.3 * rows)
     table_shape = slide.shapes.add_table(rows, cols, left, top, width, height)
+    table_shape.name = table_name
     table = table_shape.table
     for j, col in enumerate(df.columns):
         table.cell(0, j).text = str(col)
