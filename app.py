@@ -95,11 +95,13 @@ def add_table(slide, table_name, df: pd.DataFrame):
         for j in range(len(df.columns)):
             table.cell(i+1, j).text = str(df.iloc[i, j])
 
-    graphic_frame = table_shape._element
-    graphic_frame.graphicFrame.ln = None
-    graphic_frame.graphicFrame.shadow = None
-    graphic_frame.graphicFrame.effectLst = None
-    graphic_frame.graphicFrame.scene3d = None
+    # Avoid manipulating the low-level XML that may not exist across templates.
+    # python-pptx represents the table as a ``CT_GraphicalObjectFrame`` whose
+    # schema does not expose a ``graphicFrame`` attribute.  Some versions of the
+    # library can therefore raise an AttributeError when we try to clear borders
+    # by touching ``graphicFrame`` directly.  Since this styling tweak is only a
+    # nice-to-have, we simply rely on the template/theme defaults instead of
+    # editing the XML manually.
     return True
 
 def build_pptx_from_template(template_bytes, df):
