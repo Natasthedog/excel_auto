@@ -50,6 +50,12 @@ def update_or_add_column_chart(slide, chart_name, categories, series_dict):
         chart_shape.chart.replace_data(cd)
         return chart_shape
     else:
+        # Fallback: repurpose the first chart on the slide if present.
+        for shape in slide.shapes:
+            if shape.has_chart:
+                shape.chart.replace_data(cd)
+                shape.name = chart_name
+                return shape
         # Remove any stale shapes with the target name before adding a new chart
         for shape in list(slide.shapes):
             if getattr(shape, "name", None) == chart_name:
@@ -80,31 +86,44 @@ def set_text_by_name(slide, shape_name, text):
     return False
 
 def add_table(slide, table_name, df: pd.DataFrame):
-    # If there is a placeholder shape with that name and it's a table, try to fill it.
-    for shape in list(slide.shapes):
-        if getattr(shape, "name", None) == table_name:
+    # Identify an existing table to reuse, preferring one with the expected name.
+    target_shape = None
+    for shape in slide.shapes:
+        if getattr(shape, "name", None) == table_name and shape.has_table:
+            target_shape = shape
+            break
+
+    if target_shape is None:
+        for shape in slide.shapes:
             if shape.has_table:
-                tbl = shape.table
-                # Resize (simple): write headers to row 0, then rows afterward if room allows
-                n_rows = min(len(df) + 1, tbl.rows.__len__())
-                n_cols = min(len(df.columns), tbl.columns.__len__())
-                # headers
-                for j, col in enumerate(df.columns[:n_cols]):
-                    cell = tbl.cell(0, j)
-                    cell.text = str(col)
-                # cells
-                for i in range(1, n_rows):
-                    for j in range(n_cols):
-                        tbl.cell(i, j).text = str(df.iloc[i-1, j])
-                # Clear any leftover rows beyond the populated range
-                for i in range(n_rows, tbl.rows.__len__()):
-                    for j in range(tbl.columns.__len__()):
-                        tbl.cell(i, j).text = ""
-                return True
-            else:
-                # Remove non-table placeholders so we can insert a fresh table
-                sp = shape._element
-                sp.getparent().remove(sp)
+                target_shape = shape
+                target_shape.name = table_name
+                break
+
+    if target_shape and target_shape.has_table:
+        tbl = target_shape.table
+        # Resize (simple): write headers to row 0, then rows afterward if room allows
+        n_rows = min(len(df) + 1, tbl.rows.__len__())
+        n_cols = min(len(df.columns), tbl.columns.__len__())
+        # headers
+        for j, col in enumerate(df.columns[:n_cols]):
+            cell = tbl.cell(0, j)
+            cell.text = str(col)
+        # cells
+        for i in range(1, n_rows):
+            for j in range(n_cols):
+                tbl.cell(i, j).text = str(df.iloc[i-1, j])
+        # Clear any leftover rows beyond the populated range
+        for i in range(n_rows, tbl.rows.__len__()):
+            for j in range(tbl.columns.__len__()):
+                tbl.cell(i, j).text = ""
+        return True
+
+    # Remove non-table placeholders with the desired name so we can insert a fresh table.
+    for shape in list(slide.shapes):
+        if getattr(shape, "name", None) == table_name and not shape.has_table:
+            sp = shape._element
+            sp.getparent().remove(sp)
 
     # Otherwise, add a new table
     rows, cols = len(df) + 1, len(df.columns)
