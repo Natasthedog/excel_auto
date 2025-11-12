@@ -127,12 +127,38 @@ def add_table(slide, table_name, df: pd.DataFrame):
     # editing the XML manually.
     return True
 
+def remove_empty_placeholders(slide):
+    """Remove placeholder shapes that have no meaningful content."""
+    for shape in list(slide.shapes):
+        if not getattr(shape, "is_placeholder", False):
+            continue
+
+        # Keep placeholders that now contain text, tables, or charts with data.
+        if shape.has_text_frame:
+            if shape.text_frame.text and shape.text_frame.text.strip():
+                continue
+        elif shape.has_table:
+            # If every cell is blank, treat as empty.
+            if any(
+                cell.text.strip()
+                for row in shape.table.rows
+                for cell in row.cells
+            ):
+                continue
+        elif shape.has_chart:
+            # Assume populated charts should remain.
+            continue
+
+        sp = shape._element
+        sp.getparent().remove(sp)
+
 def build_pptx_from_template(template_bytes, df):
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
     slide1 = prs.slides[0]
     set_text_by_name(slide1, "TitleBox", "Monthly Performance Summary")
     set_text_by_name(slide1, "SubTitle", "Auto-generated via Dash + python-pptx")
+    remove_empty_placeholders(slide1)
 
     # Assume Slide 2 is for a KPI table and a chart
     slide2 = prs.slides[1] if len(prs.slides) > 1 else prs.slides.add_slide(prs.slide_layouts[5])
@@ -150,6 +176,8 @@ def build_pptx_from_template(template_bytes, df):
         categories = kpis["Brand"].tolist()
         series = {"Value": kpis["Value"].tolist()}
         update_or_add_column_chart(slide2, "Chart_ShareByBrand", categories, series)
+
+    remove_empty_placeholders(slide2)
 
     # Return bytes
     out = io.BytesIO()
