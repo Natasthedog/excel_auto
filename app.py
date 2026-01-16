@@ -204,6 +204,38 @@ def build_pptx_from_template(template_bytes, df):
     out.seek(0)
     return out.read()
 
+def render_upload_status(filename, success_label):
+    if not filename:
+        return html.Div("No file uploaded yet.", style={"color": "#888", "fontSize": "0.9rem"})
+
+    return html.Div(
+        [
+            html.Div(
+                style={
+                    "height": "10px",
+                    "backgroundColor": "#E5E7EB",
+                    "borderRadius": "999px",
+                    "overflow": "hidden",
+                    "marginTop": "8px",
+                },
+                children=[
+                    html.Div(
+                        style={
+                            "width": "100%",
+                            "height": "100%",
+                            "backgroundColor": "#22C55E",
+                            "transition": "width 0.3s ease",
+                        }
+                    )
+                ],
+            ),
+            html.Div(
+                f"{success_label}: {filename}",
+                style={"color": "#15803D", "fontSize": "0.9rem", "marginTop": "6px"},
+            ),
+        ]
+    )
+
 app.layout = html.Div(
     style={"maxWidth":"900px","margin":"40px auto","fontFamily":"Inter, system-ui"},
     children=[
@@ -212,10 +244,19 @@ app.layout = html.Div(
         html.Div([
             html.Label("Upload data (CSV/XLSX):"),
             dcc.Upload(id="data-upload", children=html.Div(["Drag & Drop or ", html.A("Select File")]),
-                       multiple=False, style={"padding":"20px","border":"1px dashed #888","borderRadius":"12px","marginBottom":"12px"}),
+                       multiple=False, style={"padding":"20px","border":"1px dashed #888","borderRadius":"12px","marginBottom":"6px"}),
+            html.Div(
+                id="data-upload-status",
+                children=render_upload_status(None, "Data upload complete"),
+                style={"marginBottom":"12px"},
+            ),
             html.Label("Upload PPTX template:"),
             dcc.Upload(id="pptx-upload", children=html.Div(["Drag & Drop or ", html.A("Select PPTX")]),
-                       multiple=False, style={"padding":"20px","border":"1px dashed #888","borderRadius":"12px"}),
+                       multiple=False, style={"padding":"20px","border":"1px dashed #888","borderRadius":"12px","marginBottom":"6px"}),
+            html.Div(
+                id="pptx-upload-status",
+                children=render_upload_status(None, "PPTX upload complete"),
+            ),
         ], style={"marginBottom":"18px"}),
 
         html.Button("Generate Deck", id="go", n_clicks=0, style={"padding":"10px 16px","borderRadius":"10px"}),
@@ -223,6 +264,26 @@ app.layout = html.Div(
         dcc.Download(id="download"),
     ]
 )
+
+@callback(
+    Output("data-upload-status", "children"),
+    Input("data-upload", "contents"),
+    State("data-upload", "filename"),
+)
+def show_data_upload_status(contents, filename):
+    if not contents:
+        return render_upload_status(None, "Data upload complete")
+    return render_upload_status(filename, "Data upload complete")
+
+@callback(
+    Output("pptx-upload-status", "children"),
+    Input("pptx-upload", "contents"),
+    State("pptx-upload", "filename"),
+)
+def show_pptx_upload_status(contents, filename):
+    if not contents:
+        return render_upload_status(None, "PPTX upload complete")
+    return render_upload_status(filename, "PPTX upload complete")
 
 @callback(
     Output("download","data"),
