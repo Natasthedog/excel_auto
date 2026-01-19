@@ -364,14 +364,41 @@ def _coerce_yearwk(value) -> int:
     return numeric_value
 
 
-def _format_modelling_period(data_df: pd.DataFrame, scope_df: pd.DataFrame) -> str:
+def _format_modelling_period(data_df: pd.DataFrame, scope_df: pd.DataFrame) -> tuple[str, int]:
     start_company_week = _find_company_week_value(scope_df, "First week of modelling")
     end_company_week = _find_company_week_value(scope_df, "Last week of modelling")
     start_yearwk = _coerce_yearwk(start_company_week)
     end_yearwk = _coerce_yearwk(end_company_week)
     start_date = CompanyWeekMapper._yearwk_to_monday(start_yearwk)
     end_date = CompanyWeekMapper._yearwk_to_monday(end_yearwk) + timedelta(days=6)
-    return f"{start_date:%b %d, %Y} - {end_date:%b %d, %Y}"
+    week_count = ((end_date - start_date).days // 7) + 1
+    return f"{start_date:%b %d, %Y} - {end_date:%b %d, %Y}", week_count
+
+
+def set_time_period_text(slide, label_text, time_period, week_count):
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        text_frame = shape.text_frame
+        if label_text not in text_frame.text:
+            continue
+        label_index = None
+        for idx, paragraph in enumerate(text_frame.paragraphs):
+            if label_text in paragraph.text:
+                label_index = idx
+                break
+        if label_index is None:
+            continue
+        paragraphs = list(text_frame.paragraphs)
+        if label_index + 1 < len(paragraphs):
+            value_paragraph = paragraphs[label_index + 1]
+        else:
+            value_paragraph = text_frame.add_paragraph()
+        value_paragraph.text = f"{time_period} (number of weeks = {week_count})"
+        for extra_paragraph in paragraphs[label_index + 2:]:
+            extra_paragraph.text = ""
+        return True
+    return False
 
 def build_pptx_from_template(
     template_bytes,
@@ -410,8 +437,8 @@ def build_pptx_from_template(
 
     if project_name == "MMx" and len(prs.slides) > 3:
         slide4 = prs.slides[3]
-        time_period = _format_modelling_period(df, scope_df)
-        replace_text_in_slide(slide4, "TIME PERIOD", f"TIME PERIOD\n{time_period}")
+        time_period, week_count = _format_modelling_period(df, scope_df)
+        set_time_period_text(slide4, "TIME PERIOD", time_period, week_count)
         remove_empty_placeholders(slide4)
 
     # Return bytes
