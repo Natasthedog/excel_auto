@@ -303,20 +303,35 @@ def _normalize_label(value: str) -> str:
     return " ".join(value.strip().lower().replace(":", "").split())
 
 
-def _find_company_week_value(scope_df: pd.DataFrame, label: str) -> int:
+def _find_company_week_value(scope_df: pd.DataFrame, label: str):
     if scope_df is None or scope_df.empty or scope_df.shape[1] < 2:
         raise ValueError("Scope file must include labels in column A and company weeks in column B.")
     label_normalized = _normalize_label(label)
+    candidates = []
     for _, row in scope_df.iterrows():
         cell_value = row.iloc[0]
         if pd.isna(cell_value):
             continue
         cell_label = _normalize_label(str(cell_value))
-        if label_normalized in cell_label:
+        candidates.append((cell_label, row))
+        if label_normalized in cell_label or cell_label in label_normalized:
             value = row.iloc[1]
             if pd.isna(value):
                 raise ValueError(f"Missing company week value for '{label}'.")
-            return int(float(value))
+            return value
+    if candidates:
+        from difflib import get_close_matches
+
+        labels = [candidate_label for candidate_label, _ in candidates]
+        matches = get_close_matches(label_normalized, labels, n=1, cutoff=0.7)
+        if matches:
+            matched_label = matches[0]
+            for candidate_label, row in candidates:
+                if candidate_label == matched_label:
+                    value = row.iloc[1]
+                    if pd.isna(value):
+                        raise ValueError(f"Missing company week value for '{label}'.")
+                    return value
     raise ValueError(f"Could not find '{label}' in the scope file.")
 
 
