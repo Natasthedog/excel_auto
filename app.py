@@ -137,6 +137,21 @@ def target_brand_from_scope_df(scope_df):
 
     return None
 
+def modelled_category_from_scope_df(scope_df):
+    if scope_df is None or scope_df.empty:
+        return None
+
+    if scope_df.shape[1] >= 2:
+        for _, row in scope_df.iterrows():
+            if not len(row):
+                continue
+            label = str(row.iloc[0]).strip()
+            normalized_label = _normalize_label(label)
+            if normalized_label == "category" and pd.notna(row.iloc[1]):
+                return str(row.iloc[1])
+
+    return None
+
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
     If a chart with name=chart_name exists on the slide, update its data.
@@ -437,6 +452,13 @@ def build_pptx_from_template(
 
     if project_name == "MMx" and len(prs.slides) > 3:
         slide4 = prs.slides[3]
+        modelled_category = modelled_category_from_scope_df(scope_df)
+        if modelled_category:
+            replace_text_in_slide(
+                slide4,
+                "Modelled Category:",
+                f"Modelled Category: {modelled_category}",
+            )
         time_period, week_count = _format_modelling_period(df, scope_df)
         set_time_period_text(slide4, "TIME PERIOD", time_period, week_count)
         remove_empty_placeholders(slide4)
