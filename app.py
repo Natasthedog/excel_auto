@@ -342,16 +342,26 @@ def _coerce_yearwk(value) -> int:
     if not raw:
         raise ValueError("Missing company week value for modelling period.")
     try:
-        yearwk = int(float(raw))
+        numeric_value = int(float(raw))
     except ValueError:
         digits = "".join(ch for ch in raw if ch.isdigit())
         if not digits:
-            raise ValueError("Company week value must be a YYYYWW-style week number.")
-        yearwk = int(digits)
-    year, week = divmod(yearwk, 100)
+            raise ValueError("Company week value must be a YYYYWW-style week number or a company week.")
+        numeric_value = int(digits)
+
+    if len(str(numeric_value)) <= 4:
+        mapper = CompanyWeekMapper(
+            anchor_company_week=2455,
+            anchor_yearwk=202638,
+            check_company_week=2470,
+            check_yearwk=202653,
+        )
+        return mapper.to_yearwk(numeric_value)
+
+    year, week = divmod(numeric_value, 100)
     if year <= 0 or not (1 <= week <= 53):
-        raise ValueError("Company week value must be a YYYYWW-style week number.")
-    return yearwk
+        raise ValueError("Company week value must be a YYYYWW-style week number or a company week.")
+    return numeric_value
 
 
 def _format_modelling_period(data_df: pd.DataFrame, scope_df: pd.DataFrame) -> str:
