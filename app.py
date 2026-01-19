@@ -263,11 +263,40 @@ app.layout = html.Div(
         ),
         html.Div([
             html.Label("Upload data (CSV/XLSX):"),
-            dcc.Upload(id="data-upload", children=html.Div(["Drag & Drop or ", html.A("Select File")]),
-                       multiple=False, style={"padding":"20px","border":"1px dashed #888","borderRadius":"12px","marginBottom":"6px"}),
+            dcc.Upload(
+                id="data-upload",
+                children=html.Div(["Drag & Drop or ", html.A("Select File")]),
+                multiple=False,
+                style={
+                    "padding":"20px",
+                    "border":"1px dashed #888",
+                    "borderRadius":"12px",
+                    "marginBottom":"6px",
+                },
+            ),
             html.Div(
                 id="data-upload-status",
                 children=render_upload_status(None, "Data upload complete"),
+                style={"marginBottom":"12px"},
+            ),
+        ], style={"marginBottom":"18px"}),
+        html.Div([
+            html.Label("Upload scope file (.xlsx):"),
+            dcc.Upload(
+                id="scope-upload",
+                children=html.Div(["Drag & Drop or ", html.A("Select File")]),
+                accept=".xlsx",
+                multiple=False,
+                style={
+                    "padding":"20px",
+                    "border":"1px dashed #888",
+                    "borderRadius":"12px",
+                    "marginBottom":"6px",
+                },
+            ),
+            html.Div(
+                id="scope-upload-status",
+                children=render_upload_status(None, "Scope upload complete"),
                 style={"marginBottom":"12px"},
             ),
         ], style={"marginBottom":"18px"}),
@@ -289,17 +318,36 @@ def show_data_upload_status(contents, filename):
     return render_upload_status(filename, "Data upload complete")
 
 @callback(
+    Output("scope-upload-status", "children"),
+    Input("scope-upload", "contents"),
+    State("scope-upload", "filename"),
+)
+def show_scope_upload_status(contents, filename):
+    if not contents:
+        return render_upload_status(None, "Scope upload complete")
+    return render_upload_status(filename, "Scope upload complete")
+
+@callback(
     Output("download","data"),
     Output("status","children"),
     Input("go","n_clicks"),
     State("data-upload","contents"),
     State("data-upload","filename"),
+    State("scope-upload", "contents"),
+    State("scope-upload", "filename"),
     State("project-select", "value"),
     prevent_initial_call=True
 )
-def generate_deck(n_clicks, data_contents, data_name, project_name):
-    if not data_contents or not project_name:
-        return no_update, "Please upload the data file and select a project."
+def generate_deck(
+    n_clicks,
+    data_contents,
+    data_name,
+    scope_contents,
+    scope_name,
+    project_name,
+):
+    if not data_contents or not project_name or not scope_contents:
+        return no_update, "Please upload the data file, scope file, and select a project."
 
     template_path = PROJECT_TEMPLATES.get(project_name)
     if not template_path or not template_path.exists():
