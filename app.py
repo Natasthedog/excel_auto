@@ -55,7 +55,8 @@ def target_brand_from_scope(contents, filename):
         if not len(row):
             continue
         label = str(row.iloc[0]).strip().lower()
-        if label == "target brand" and len(row) > 1 and pd.notna(row.iloc[1]):
+        normalized_label = label.rstrip(":")
+        if normalized_label == "target brand" and len(row) > 1 and pd.notna(row.iloc[1]):
             return str(row.iloc[1])
 
     return None
