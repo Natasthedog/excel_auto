@@ -240,6 +240,29 @@ def replace_text_in_slide_preserve_formatting(slide, old_text, new_text):
                     replaced = True
     return replaced
 
+
+def append_text_after_label(slide, label_text, appended_text):
+    if not appended_text:
+        return False
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        for paragraph in shape.text_frame.paragraphs:
+            if label_text not in paragraph.text:
+                continue
+            if appended_text in paragraph.text:
+                return True
+            spacer = "" if label_text.endswith(" ") else " "
+            for run in paragraph.runs:
+                if label_text in run.text:
+                    new_run = paragraph.add_run()
+                    new_run.text = f"{spacer}{appended_text}"
+                    return True
+            new_run = paragraph.add_run()
+            new_run.text = f"{spacer}{appended_text}"
+            return True
+    return False
+
 def add_table(slide, table_name, df: pd.DataFrame):
     # Identify an existing table to reuse, preferring one with the expected name.
     target_shape = None
@@ -467,11 +490,7 @@ def build_pptx_from_template(
         slide4 = prs.slides[3]
         modelled_category = modelled_category_from_scope_df(scope_df)
         if modelled_category:
-            replace_text_in_slide_preserve_formatting(
-                slide4,
-                "Modelled Category:",
-                f"Modelled Category: {modelled_category}",
-            )
+            append_text_after_label(slide4, "Modelled Category:", modelled_category)
         time_period, week_count = _format_modelling_period(df, scope_df)
         set_time_period_text(slide4, "TIME PERIOD", time_period, week_count)
         remove_empty_placeholders(slide4)
