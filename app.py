@@ -21,15 +21,44 @@ PROJECT_TEMPLATES = {
     "MMM": TEMPLATE_DIR / "MMM.pptx",
 }
 
+def bytes_from_contents(contents):
+    _, content_string = contents.split(',')
+    return base64.b64decode(content_string)
+
+
 def df_from_contents(contents, filename):
-    content_type, content_string = contents.split(',')
-    decoded = base64.b64decode(content_string)
+    decoded = bytes_from_contents(contents)
     if filename.lower().endswith((".xlsx", ".xls")):
         return pd.read_excel(io.BytesIO(decoded))
     elif filename.lower().endswith(".csv"):
         return pd.read_csv(io.StringIO(decoded.decode('utf-8')))
     else:
         raise ValueError("Unsupported file format. Please upload CSV or Excel.")
+
+
+def target_brand_from_scope(contents, filename):
+    if not filename or not filename.lower().endswith((".xlsx", ".xls")):
+        raise ValueError("Scope file must be an Excel workbook.")
+
+    decoded = bytes_from_contents(contents)
+    scope_df = pd.read_excel(io.BytesIO(decoded), sheet_name="Overall Information")
+    if scope_df.empty:
+        return None
+
+    column_lookup = {str(col).strip().lower(): col for col in scope_df.columns}
+    if "target brand" in column_lookup:
+        series = scope_df[column_lookup["target brand"]].dropna()
+        if not series.empty:
+            return str(series.iloc[0])
+
+    for _, row in scope_df.iterrows():
+        if not len(row):
+            continue
+        label = str(row.iloc[0]).strip().lower()
+        if label == "target brand" and len(row) > 1 and pd.notna(row.iloc[1]):
+            return str(row.iloc[1])
+
+    return None
 
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
@@ -92,6 +121,19 @@ def set_text_by_name(slide, shape_name, text):
             p.alignment = PP_ALIGN.LEFT
             return True
     return False
+
+
+def replace_text_in_slide(slide, old_text, new_text):
+    replaced = False
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        text_frame = shape.text_frame
+        current_text = text_frame.text
+        if old_text in current_text:
+            text_frame.text = current_text.replace(old_text, new_text)
+            replaced = True
+    return replaced
 
 def add_table(slide, table_name, df: pd.DataFrame):
     # Identify an existing table to reuse, preferring one with the expected name.
@@ -179,12 +221,14 @@ def remove_empty_placeholders(slide):
         sp = shape._element
         sp.getparent().remove(sp)
 
-def build_pptx_from_template(template_bytes, df):
+def build_pptx_from_template(template_bytes, df, target_brand=None):
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
     slide1 = prs.slides[0]
     set_text_by_name(slide1, "TitleBox", "Monthly Performance Summary")
     set_text_by_name(slide1, "SubTitle", "Auto-generated via Dash + python-pptx")
+    if target_brand:
+        replace_text_in_slide(slide1, "Target Brand", target_brand)
     remove_empty_placeholders(slide1)
 
     # Assume Slide 2 is for a KPI table and a chart
@@ -354,9 +398,10 @@ def generate_deck(
         return no_update, "The selected project template could not be found."
     try:
         df = df_from_contents(data_contents, data_name)
+        target_brand = target_brand_from_scope(scope_contents, scope_name)
         template_bytes = template_path.read_bytes()
 
-        pptx_bytes = build_pptx_from_template(template_bytes, df)
+        pptx_bytes = build_pptx_from_template(template_bytes, df, target_brand)
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
     except Exception as e:
