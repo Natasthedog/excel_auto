@@ -37,11 +37,18 @@ def df_from_contents(contents, filename):
 
 
 def target_brand_from_scope(contents, filename):
-    if not filename or not filename.lower().endswith((".xlsx", ".xls")):
-        raise ValueError("Scope file must be an Excel workbook.")
+    if not filename or not filename.lower().endswith((".xlsx", ".xlsb")):
+        raise ValueError("Scope file must be an Excel workbook (.xlsx or .xlsb).")
 
     decoded = bytes_from_contents(contents)
-    scope_df = pd.read_excel(io.BytesIO(decoded), sheet_name="Overall Information")
+    read_options = {}
+    if filename.lower().endswith(".xlsb"):
+        read_options["engine"] = "pyxlsb"
+    scope_df = pd.read_excel(
+        io.BytesIO(decoded),
+        sheet_name="Overall Information",
+        **read_options,
+    )
     if scope_df.empty:
         return None
 
@@ -326,11 +333,11 @@ app.layout = html.Div(
             ),
         ], style={"marginBottom":"18px"}),
         html.Div([
-            html.Label("Upload scope file (.xlsx):"),
+            html.Label("Upload scope file (.xlsx or .xlsb):"),
             dcc.Upload(
                 id="scope-upload",
                 children=html.Div(["Drag & Drop or ", html.A("Select File")]),
-                accept=".xlsx",
+                accept=".xlsx,.xlsb",
                 multiple=False,
                 style={
                     "padding":"20px",
