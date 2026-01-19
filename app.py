@@ -1,6 +1,8 @@
 # app.py
 import io
 import base64
+from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +22,67 @@ PROJECT_TEMPLATES = {
     "MMx": TEMPLATE_DIR / "MMx.pptx",
     "MMM": TEMPLATE_DIR / "MMM.pptx",
 }
+
+
+@dataclass(frozen=True)
+class CompanyWeekMapper:
+    """
+    Maps between a sequential internal 'company_week' integer and YEARWK (YYYYWW),
+    assuming YEARWK is an ISO week (ISO-8601).
+
+    Provide at least one anchor mapping:
+        (anchor_company_week -> anchor_yearwk)
+
+    Optionally provide a second anchor to validate the mapping.
+    """
+    anchor_company_week: int
+    anchor_yearwk: int
+    check_company_week: int | None = None
+    check_yearwk: int | None = None
+
+    @staticmethod
+    def _yearwk_to_monday(yearwk: int) -> date:
+        y, w = divmod(yearwk, 100)
+        if not (1 <= w <= 53):
+            raise ValueError(f"Invalid YEARWK week number: {yearwk}")
+        # Monday of ISO week
+        return date.fromisocalendar(y, w, 1)
+
+    @staticmethod
+    def _monday_to_yearwk(d: date) -> int:
+        iso_y, iso_w, _ = d.isocalendar()
+        return iso_y * 100 + iso_w
+
+    def __post_init__(self):
+        # Optional consistency check with second anchor
+        if (self.check_company_week is None) ^ (self.check_yearwk is None):
+            raise ValueError("Provide both check_company_week and check_yearwk, or neither.")
+
+        if self.check_company_week is not None:
+            a_date = self._yearwk_to_monday(self.anchor_yearwk)
+            delta = self.check_company_week - self.anchor_company_week
+            derived = self._monday_to_yearwk(a_date + timedelta(weeks=delta))
+            if derived != self.check_yearwk:
+                raise ValueError(
+                    f"Anchors inconsistent: derived {derived} but expected {self.check_yearwk}."
+                )
+
+    def to_yearwk(self, company_week: int) -> int:
+        a_date = self._yearwk_to_monday(self.anchor_yearwk)
+        delta_weeks = company_week - self.anchor_company_week
+        out_date = a_date + timedelta(weeks=delta_weeks)
+        return self._monday_to_yearwk(out_date)
+
+    def to_company_week(self, yearwk: int) -> int:
+        a_date = self._yearwk_to_monday(self.anchor_yearwk)
+        target_date = self._yearwk_to_monday(yearwk)
+        delta_days = (target_date - a_date).days
+
+        if delta_days % 7 != 0:
+            # Should never happen because both are Mondays, but keep it safe
+            raise ValueError("Non-week-aligned difference; check inputs.")
+        delta_weeks = delta_days // 7
+        return self.anchor_company_week + delta_weeks
 
 def bytes_from_contents(contents):
     _, content_string = contents.split(',')
@@ -229,7 +292,63 @@ def remove_empty_placeholders(slide):
         sp = shape._element
         sp.getparent().remove(sp)
 
-def build_pptx_from_template(template_bytes, df, target_brand=None):
+
+def _find_company_week_value(df: pd.DataFrame, label: str) -> int:
+    if df.shape[1] < 2:
+        raise ValueError("Data file must include at least two columns for company week mapping.")
+    label_lower = label.strip().lower()
+    for _, row in df.iterrows():
+        if any(str(cell).strip().lower() == label_lower for cell in row.tolist()):
+            value = row.iloc[1]
+            if pd.isna(value):
+                raise ValueError(f"Missing company week value for '{label}'.")
+            return int(float(value))
+    raise ValueError(f"Could not find '{label}' in the data file.")
+
+
+def _company_week_mapper_from_df(df: pd.DataFrame) -> CompanyWeekMapper:
+    normalized = {str(col): str(col).strip().lower().replace("_", " ") for col in df.columns}
+    company_col = None
+    yearwk_col = None
+    for col, norm in normalized.items():
+        if "company week" in norm:
+            company_col = col
+        if "yearwk" in norm.replace(" ", "") or "year wk" in norm:
+            yearwk_col = col
+    if not company_col or not yearwk_col:
+        raise ValueError("Data file must include Company Week and YEARWK columns for date mapping.")
+
+    anchor_rows = df[[company_col, yearwk_col]].dropna()
+    if anchor_rows.empty:
+        raise ValueError("Data file is missing Company Week/YEARWK values for mapping.")
+
+    anchor_company_week = int(float(anchor_rows.iloc[0][company_col]))
+    anchor_yearwk = int(float(anchor_rows.iloc[0][yearwk_col]))
+    if len(anchor_rows) > 1:
+        check_company_week = int(float(anchor_rows.iloc[1][company_col]))
+        check_yearwk = int(float(anchor_rows.iloc[1][yearwk_col]))
+    else:
+        check_company_week = None
+        check_yearwk = None
+    return CompanyWeekMapper(
+        anchor_company_week=anchor_company_week,
+        anchor_yearwk=anchor_yearwk,
+        check_company_week=check_company_week,
+        check_yearwk=check_yearwk,
+    )
+
+
+def _format_modelling_period(df: pd.DataFrame) -> str:
+    mapper = _company_week_mapper_from_df(df)
+    start_company_week = _find_company_week_value(df, "First week of modelling period")
+    end_company_week = _find_company_week_value(df, "Last week of modelling period")
+    start_yearwk = mapper.to_yearwk(start_company_week)
+    end_yearwk = mapper.to_yearwk(end_company_week)
+    start_date = mapper._yearwk_to_monday(start_yearwk)
+    end_date = mapper._yearwk_to_monday(end_yearwk) + timedelta(days=6)
+    return f"{start_date:%b %d, %Y} - {end_date:%b %d, %Y}"
+
+def build_pptx_from_template(template_bytes, df, target_brand=None, project_name=None):
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
     slide1 = prs.slides[0]
@@ -257,6 +376,12 @@ def build_pptx_from_template(template_bytes, df, target_brand=None):
         update_or_add_column_chart(slide2, "Chart_ShareByBrand", categories, series)
 
     remove_empty_placeholders(slide2)
+
+    if project_name == "MMx" and len(prs.slides) > 3:
+        slide4 = prs.slides[3]
+        time_period = _format_modelling_period(df)
+        replace_text_in_slide(slide4, "TIME PERIOD", f"TIME PERIOD\n{time_period}")
+        remove_empty_placeholders(slide4)
 
     # Return bytes
     out = io.BytesIO()
@@ -409,7 +534,7 @@ def generate_deck(
         target_brand = target_brand_from_scope(scope_contents, scope_name)
         template_bytes = template_path.read_bytes()
 
-        pptx_bytes = build_pptx_from_template(template_bytes, df, target_brand)
+        pptx_bytes = build_pptx_from_template(template_bytes, df, target_brand, project_name)
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
     except Exception as e:
