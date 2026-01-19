@@ -99,7 +99,7 @@ def df_from_contents(contents, filename):
         raise ValueError("Unsupported file format. Please upload CSV or Excel.")
 
 
-def target_brand_from_scope(contents, filename):
+def scope_df_from_contents(contents, filename):
     if not filename or not filename.lower().endswith((".xlsx", ".xlsb")):
         raise ValueError("Scope file must be an Excel workbook (.xlsx or .xlsb).")
 
@@ -113,6 +113,12 @@ def target_brand_from_scope(contents, filename):
         **read_options,
     )
     if scope_df.empty:
+        return None
+    return scope_df
+
+
+def target_brand_from_scope_df(scope_df):
+    if scope_df is None or scope_df.empty:
         return None
 
     column_lookup = {str(col).strip().lower(): col for col in scope_df.columns}
@@ -293,17 +299,25 @@ def remove_empty_placeholders(slide):
         sp.getparent().remove(sp)
 
 
-def _find_company_week_value(df: pd.DataFrame, label: str) -> int:
-    if df.shape[1] < 2:
-        raise ValueError("Data file must include at least two columns for company week mapping.")
-    label_lower = label.strip().lower()
-    for _, row in df.iterrows():
-        if any(str(cell).strip().lower() == label_lower for cell in row.tolist()):
+def _normalize_label(value: str) -> str:
+    return " ".join(value.strip().lower().replace(":", "").split())
+
+
+def _find_company_week_value(scope_df: pd.DataFrame, label: str) -> int:
+    if scope_df is None or scope_df.empty or scope_df.shape[1] < 2:
+        raise ValueError("Scope file must include labels in column A and company weeks in column B.")
+    label_normalized = _normalize_label(label)
+    for _, row in scope_df.iterrows():
+        cell_value = row.iloc[0]
+        if pd.isna(cell_value):
+            continue
+        cell_label = _normalize_label(str(cell_value))
+        if label_normalized in cell_label:
             value = row.iloc[1]
             if pd.isna(value):
                 raise ValueError(f"Missing company week value for '{label}'.")
             return int(float(value))
-    raise ValueError(f"Could not find '{label}' in the data file.")
+    raise ValueError(f"Could not find '{label}' in the scope file.")
 
 
 def _company_week_mapper_from_df(df: pd.DataFrame) -> CompanyWeekMapper:
@@ -338,17 +352,23 @@ def _company_week_mapper_from_df(df: pd.DataFrame) -> CompanyWeekMapper:
     )
 
 
-def _format_modelling_period(df: pd.DataFrame) -> str:
-    mapper = _company_week_mapper_from_df(df)
-    start_company_week = _find_company_week_value(df, "First week of modelling period")
-    end_company_week = _find_company_week_value(df, "Last week of modelling period")
+def _format_modelling_period(data_df: pd.DataFrame, scope_df: pd.DataFrame) -> str:
+    mapper = _company_week_mapper_from_df(data_df)
+    start_company_week = _find_company_week_value(scope_df, "First week of modelling")
+    end_company_week = _find_company_week_value(scope_df, "Last week of modelling")
     start_yearwk = mapper.to_yearwk(start_company_week)
     end_yearwk = mapper.to_yearwk(end_company_week)
     start_date = mapper._yearwk_to_monday(start_yearwk)
     end_date = mapper._yearwk_to_monday(end_yearwk) + timedelta(days=6)
     return f"{start_date:%b %d, %Y} - {end_date:%b %d, %Y}"
 
-def build_pptx_from_template(template_bytes, df, target_brand=None, project_name=None):
+def build_pptx_from_template(
+    template_bytes,
+    df,
+    target_brand=None,
+    project_name=None,
+    scope_df=None,
+):
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
     slide1 = prs.slides[0]
@@ -379,7 +399,7 @@ def build_pptx_from_template(template_bytes, df, target_brand=None, project_name
 
     if project_name == "MMx" and len(prs.slides) > 3:
         slide4 = prs.slides[3]
-        time_period = _format_modelling_period(df)
+        time_period = _format_modelling_period(df, scope_df)
         replace_text_in_slide(slide4, "TIME PERIOD", f"TIME PERIOD\n{time_period}")
         remove_empty_placeholders(slide4)
 
@@ -531,10 +551,17 @@ def generate_deck(
         return no_update, "The selected project template could not be found."
     try:
         df = df_from_contents(data_contents, data_name)
-        target_brand = target_brand_from_scope(scope_contents, scope_name)
+        scope_df = scope_df_from_contents(scope_contents, scope_name)
+        target_brand = target_brand_from_scope_df(scope_df)
         template_bytes = template_path.read_bytes()
 
-        pptx_bytes = build_pptx_from_template(template_bytes, df, target_brand, project_name)
+        pptx_bytes = build_pptx_from_template(
+            template_bytes,
+            df,
+            target_brand,
+            project_name,
+            scope_df,
+        )
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
     except Exception as e:
