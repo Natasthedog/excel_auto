@@ -1,10 +1,12 @@
 # app.py
 import io
 import base64
+from pathlib import Path
+
 import pandas as pd
 from dash import Dash, html, dcc, Input, Output, State, callback, no_update
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.util import Inches
 from pptx.enum.text import PP_ALIGN
 from pptx.chart.data import ChartData
 from pptx.enum.chart import XL_CHART_TYPE
@@ -12,6 +14,12 @@ from pptx.enum.chart import XL_CHART_TYPE
 app = Dash(__name__)
 app.title = "Deck Automator (MVP)"
 server = app.server
+TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "templates"
+PROJECT_TEMPLATES = {
+    "PnP": TEMPLATE_DIR / "PnP.pptx",
+    "MMx": TEMPLATE_DIR / "MMx.pptx",
+    "MMM": TEMPLATE_DIR / "MMM.pptx",
+}
 
 def df_from_contents(contents, filename):
     content_type, content_string = contents.split(',')
@@ -240,7 +248,19 @@ app.layout = html.Div(
     style={"maxWidth":"900px","margin":"40px auto","fontFamily":"Inter, system-ui"},
     children=[
         html.H2("PowerPoint Deck Automator (Dash + python-pptx)"),
-        html.P("Upload your data and a PPTX template with named shapes (TitleBox, SubTitle, Table_Summary, Chart_ShareByBrand)."),
+        html.P("Upload your data, pick the project, and we will fill the matching PPTX template."),
+        html.Div(
+            [
+                html.Label("Which project are you working on?"),
+                dcc.Dropdown(
+                    id="project-select",
+                    options=[{"label": key, "value": key} for key in PROJECT_TEMPLATES],
+                    placeholder="Select a project",
+                    clearable=False,
+                ),
+            ],
+            style={"marginBottom": "18px"},
+        ),
         html.Div([
             html.Label("Upload data (CSV/XLSX):"),
             dcc.Upload(id="data-upload", children=html.Div(["Drag & Drop or ", html.A("Select File")]),
@@ -249,13 +269,6 @@ app.layout = html.Div(
                 id="data-upload-status",
                 children=render_upload_status(None, "Data upload complete"),
                 style={"marginBottom":"12px"},
-            ),
-            html.Label("Upload PPTX template:"),
-            dcc.Upload(id="pptx-upload", children=html.Div(["Drag & Drop or ", html.A("Select PPTX")]),
-                       multiple=False, style={"padding":"20px","border":"1px dashed #888","borderRadius":"12px","marginBottom":"6px"}),
-            html.Div(
-                id="pptx-upload-status",
-                children=render_upload_status(None, "PPTX upload complete"),
             ),
         ], style={"marginBottom":"18px"}),
 
@@ -276,32 +289,24 @@ def show_data_upload_status(contents, filename):
     return render_upload_status(filename, "Data upload complete")
 
 @callback(
-    Output("pptx-upload-status", "children"),
-    Input("pptx-upload", "contents"),
-    State("pptx-upload", "filename"),
-)
-def show_pptx_upload_status(contents, filename):
-    if not contents:
-        return render_upload_status(None, "PPTX upload complete")
-    return render_upload_status(filename, "PPTX upload complete")
-
-@callback(
     Output("download","data"),
     Output("status","children"),
     Input("go","n_clicks"),
     State("data-upload","contents"),
     State("data-upload","filename"),
-    State("pptx-upload","contents"),
-    State("pptx-upload","filename"),
+    State("project-select", "value"),
     prevent_initial_call=True
 )
-def generate_deck(n_clicks, data_contents, data_name, pptx_contents, pptx_name):
-    if not data_contents or not pptx_contents:
-        return no_update, "Please upload both the data file and the PPTX template."
+def generate_deck(n_clicks, data_contents, data_name, project_name):
+    if not data_contents or not project_name:
+        return no_update, "Please upload the data file and select a project."
+
+    template_path = PROJECT_TEMPLATES.get(project_name)
+    if not template_path or not template_path.exists():
+        return no_update, "The selected project template could not be found."
     try:
         df = df_from_contents(data_contents, data_name)
-        _, pptx_b64 = pptx_contents.split(',')
-        template_bytes = base64.b64decode(pptx_b64)
+        template_bytes = template_path.read_bytes()
 
         pptx_bytes = build_pptx_from_template(template_bytes, df)
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
@@ -320,11 +325,10 @@ def _writer(f):
 @callback(
     Output("download","data", allow_duplicate=True),
     Input("status","children"),
-    State("pptx-upload","contents"),
     State("data-upload","contents"),
     prevent_initial_call=True
 )
-def finalize_download(status_text, pptx_contents, data_contents):
+def finalize_download(status_text, data_contents):
     # This is a no-op; left for clarity in a larger app. In the minimal example above,
     # you can directly return the 'dcc.send_bytes' with the actual bytes.
     return no_update
