@@ -320,46 +320,32 @@ def _find_company_week_value(scope_df: pd.DataFrame, label: str) -> int:
     raise ValueError(f"Could not find '{label}' in the scope file.")
 
 
-def _company_week_mapper_from_df(df: pd.DataFrame) -> CompanyWeekMapper:
-    normalized = {str(col): str(col).strip().lower().replace("_", " ") for col in df.columns}
-    company_col = None
-    yearwk_col = None
-    for col, norm in normalized.items():
-        if "company week" in norm:
-            company_col = col
-        if "yearwk" in norm.replace(" ", "") or "year wk" in norm:
-            yearwk_col = col
-    if not company_col or not yearwk_col:
-        raise ValueError("Data file must include Company Week and YEARWK columns for date mapping.")
-
-    anchor_rows = df[[company_col, yearwk_col]].dropna()
-    if anchor_rows.empty:
-        raise ValueError("Data file is missing Company Week/YEARWK values for mapping.")
-
-    anchor_company_week = int(float(anchor_rows.iloc[0][company_col]))
-    anchor_yearwk = int(float(anchor_rows.iloc[0][yearwk_col]))
-    if len(anchor_rows) > 1:
-        check_company_week = int(float(anchor_rows.iloc[1][company_col]))
-        check_yearwk = int(float(anchor_rows.iloc[1][yearwk_col]))
-    else:
-        check_company_week = None
-        check_yearwk = None
-    return CompanyWeekMapper(
-        anchor_company_week=anchor_company_week,
-        anchor_yearwk=anchor_yearwk,
-        check_company_week=check_company_week,
-        check_yearwk=check_yearwk,
-    )
+def _coerce_yearwk(value) -> int:
+    if pd.isna(value):
+        raise ValueError("Missing company week value for modelling period.")
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError("Missing company week value for modelling period.")
+    try:
+        yearwk = int(float(raw))
+    except ValueError:
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if not digits:
+            raise ValueError("Company week value must be a YYYYWW-style week number.")
+        yearwk = int(digits)
+    year, week = divmod(yearwk, 100)
+    if year <= 0 or not (1 <= week <= 53):
+        raise ValueError("Company week value must be a YYYYWW-style week number.")
+    return yearwk
 
 
 def _format_modelling_period(data_df: pd.DataFrame, scope_df: pd.DataFrame) -> str:
-    mapper = _company_week_mapper_from_df(data_df)
     start_company_week = _find_company_week_value(scope_df, "First week of modelling")
     end_company_week = _find_company_week_value(scope_df, "Last week of modelling")
-    start_yearwk = mapper.to_yearwk(start_company_week)
-    end_yearwk = mapper.to_yearwk(end_company_week)
-    start_date = mapper._yearwk_to_monday(start_yearwk)
-    end_date = mapper._yearwk_to_monday(end_yearwk) + timedelta(days=6)
+    start_yearwk = _coerce_yearwk(start_company_week)
+    end_yearwk = _coerce_yearwk(end_company_week)
+    start_date = CompanyWeekMapper._yearwk_to_monday(start_yearwk)
+    end_date = CompanyWeekMapper._yearwk_to_monday(end_yearwk) + timedelta(days=6)
     return f"{start_date:%b %d, %Y} - {end_date:%b %d, %Y}"
 
 def build_pptx_from_template(
