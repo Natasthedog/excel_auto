@@ -227,6 +227,19 @@ def replace_text_in_slide(slide, old_text, new_text):
             replaced = True
     return replaced
 
+
+def replace_text_in_slide_preserve_formatting(slide, old_text, new_text):
+    replaced = False
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        for paragraph in shape.text_frame.paragraphs:
+            for run in paragraph.runs:
+                if old_text in run.text:
+                    run.text = run.text.replace(old_text, new_text)
+                    replaced = True
+    return replaced
+
 def add_table(slide, table_name, df: pd.DataFrame):
     # Identify an existing table to reuse, preferring one with the expected name.
     target_shape = None
@@ -454,7 +467,7 @@ def build_pptx_from_template(
         slide4 = prs.slides[3]
         modelled_category = modelled_category_from_scope_df(scope_df)
         if modelled_category:
-            replace_text_in_slide(
+            replace_text_in_slide_preserve_formatting(
                 slide4,
                 "Modelled Category:",
                 f"Modelled Category: {modelled_category}",
