@@ -126,12 +126,9 @@ def product_description_df_from_contents(contents, filename):
     if filename.lower().endswith(".xlsb"):
         read_options["engine"] = "pyxlsb"
     with pd.ExcelFile(io.BytesIO(decoded), **read_options) as excel_file:
-        target_sheet = None
-        target_normalized = _normalize_label("PRODUCT DESCRIPTION")
-        for sheet_name in excel_file.sheet_names:
-            if _normalize_label(sheet_name) == target_normalized:
-                target_sheet = sheet_name
-                break
+        target_sheet = _find_sheet_by_candidates(
+            excel_file.sheet_names, "PRODUCT DESCRIPTION"
+        )
         if not target_sheet:
             return None
         product_df = excel_file.parse(target_sheet)
@@ -178,6 +175,30 @@ def modelled_category_from_scope_df(scope_df):
 
 def _normalize_column_name(value: str) -> str:
     return "".join(ch for ch in value.strip().lower() if ch.isalnum())
+
+
+def _find_sheet_by_candidates(sheet_names: list[str], target: str) -> str | None:
+    normalized_target = _normalize_column_name(target)
+    normalized_sheets = {
+        _normalize_column_name(str(sheet_name)): sheet_name
+        for sheet_name in sheet_names
+    }
+    if normalized_target in normalized_sheets:
+        return normalized_sheets[normalized_target]
+    for normalized_sheet, sheet_name in normalized_sheets.items():
+        if normalized_target in normalized_sheet or normalized_sheet in normalized_target:
+            return sheet_name
+    from difflib import get_close_matches
+
+    matches = get_close_matches(
+        normalized_target,
+        list(normalized_sheets.keys()),
+        n=1,
+        cutoff=0.7,
+    )
+    if matches:
+        return normalized_sheets[matches[0]]
+    return None
 
 
 def _find_column_by_candidates(df: pd.DataFrame, candidates: list[str]):
