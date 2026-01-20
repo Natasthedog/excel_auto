@@ -674,6 +674,18 @@ def _format_modelling_period(data_df: pd.DataFrame, scope_df: pd.DataFrame) -> t
     return f"{start_date:%b %d, %Y} - {end_date:%b %d, %Y}", week_count
 
 
+def _format_study_year_range(scope_df: pd.DataFrame) -> str:
+    start_company_week = _find_company_week_value(scope_df, "First week of modelling")
+    end_company_week = _find_company_week_value(scope_df, "Last week of modelling")
+    start_yearwk = _coerce_yearwk(start_company_week)
+    end_yearwk = _coerce_yearwk(end_company_week)
+    start_year = CompanyWeekMapper._yearwk_to_monday(start_yearwk).year
+    end_year = CompanyWeekMapper._yearwk_to_monday(end_yearwk).year
+    if start_year == end_year:
+        return str(start_year)
+    return f"{start_year}-{end_year}"
+
+
 def set_time_period_text(slide, label_text, time_period, week_count):
     for shape in slide.shapes:
         if not shape.has_text_frame:
@@ -714,6 +726,9 @@ def build_pptx_from_template(
     set_text_by_name(slide1, "SubTitle", "Auto-generated via Dash + python-pptx")
     if target_brand:
         replace_text_in_slide(slide1, "Target Brand", target_brand)
+    if project_name == "MMx" and scope_df is not None:
+        year_range = _format_study_year_range(scope_df)
+        replace_text_in_slide_preserve_formatting(slide1, "<RANGE>", year_range)
     remove_empty_placeholders(slide1)
 
     # Assume Slide 2 is for a KPI table and a chart
