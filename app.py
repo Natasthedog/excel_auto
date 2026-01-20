@@ -301,6 +301,52 @@ def target_brands_from_product_description(product_df: pd.DataFrame):
         brands.append(brand_name)
     return brands or None
 
+def target_dimensions_from_product_description(product_df: pd.DataFrame) -> list[str]:
+    if product_df is None or product_df.empty:
+        return []
+
+    normalized_columns = {
+        _normalize_column_name(str(col)): col for col in product_df.columns
+    }
+    lines = []
+    seen_dimensions = set()
+    for column in product_df.columns:
+        column_name = str(column)
+        if not column_name.strip().lower().startswith("target"):
+            continue
+        base_name = column_name.strip()[len("target"):].lstrip(" _-").strip()
+        if not base_name:
+            continue
+        base_key = _normalize_column_name(base_name)
+        if base_key in seen_dimensions:
+            continue
+        base_column = normalized_columns.get(base_key) or _find_column_by_candidates(
+            product_df, [base_name]
+        )
+        if not base_column:
+            continue
+
+        values = []
+        seen_values = set()
+        for _, row in product_df.iterrows():
+            if not _is_target_flag(row[column]):
+                continue
+            value = row[base_column]
+            if pd.isna(value):
+                continue
+            value_name = str(value).strip()
+            if not value_name or value_name in seen_values:
+                continue
+            seen_values.add(value_name)
+            values.append(value_name)
+
+        if values:
+            base_label = str(base_column).strip()
+            lines.append(f"Target {base_label}(s): {', '.join(values)}")
+            seen_dimensions.add(base_key)
+
+    return lines
+
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
     If a chart with name=chart_name exists on the slide, update its data.
@@ -430,6 +476,39 @@ def append_paragraph_after_label(slide, label_text, appended_text):
                 new_paragraph.text = appended_text
                 paragraph._p.addnext(new_paragraph._p)
                 return True
+    return False
+
+
+def append_paragraphs_after_label(slide, label_text, appended_texts):
+    if not appended_texts:
+        return False
+    appended_texts = [text for text in appended_texts if text and text.strip()]
+    if not appended_texts:
+        return False
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        text_frame = shape.text_frame
+        if label_text not in text_frame.text:
+            continue
+        existing_texts = {paragraph.text.strip() for paragraph in text_frame.paragraphs}
+        to_add = [text for text in appended_texts if text not in existing_texts]
+        if not to_add:
+            return True
+        insert_after = None
+        for paragraph in text_frame.paragraphs:
+            if label_text in paragraph.text:
+                insert_after = paragraph
+                break
+        if insert_after is None:
+            continue
+        last_paragraph = insert_after
+        for text in to_add:
+            new_paragraph = text_frame.add_paragraph()
+            new_paragraph.text = text
+            last_paragraph._p.addnext(new_paragraph._p)
+            last_paragraph = new_paragraph
+        return True
     return False
 
 def add_table(slide, table_name, df: pd.DataFrame):
@@ -661,21 +740,12 @@ def build_pptx_from_template(
         modelled_category = modelled_category_from_scope_df(scope_df)
         if modelled_category:
             append_text_after_label(slide4, "Modelled Category:", modelled_category)
-        target_manufacturers = target_manufacturers_from_scope_df(scope_df)
-        if target_manufacturers:
-            append_paragraph_after_label(
+        target_dimensions = target_dimensions_from_product_description(product_description_df)
+        if target_dimensions:
+            append_paragraphs_after_label(
                 slide4,
                 "Modelled Category:",
-                f"Target Manufacturer(s): {', '.join(target_manufacturers)}",
-            )
-        target_brands = target_brands_from_scope_df(scope_df) or target_brands_from_product_description(
-            product_description_df
-        )
-        if target_brands:
-            append_paragraph_after_label(
-                slide4,
-                "Modelled Category:",
-                f"Target Brand(s): {', '.join(target_brands)}",
+                target_dimensions,
             )
         time_period, week_count = _format_modelling_period(df, scope_df)
         set_time_period_text(slide4, "TIME PERIOD", time_period, week_count)
