@@ -117,6 +117,29 @@ def scope_df_from_contents(contents, filename):
     return scope_df
 
 
+def product_description_df_from_contents(contents, filename):
+    if not filename or not filename.lower().endswith((".xlsx", ".xlsb")):
+        raise ValueError("Scope file must be an Excel workbook (.xlsx or .xlsb).")
+
+    decoded = bytes_from_contents(contents)
+    read_options = {}
+    if filename.lower().endswith(".xlsb"):
+        read_options["engine"] = "pyxlsb"
+    with pd.ExcelFile(io.BytesIO(decoded), **read_options) as excel_file:
+        target_sheet = None
+        target_normalized = _normalize_label("PRODUCT DESCRIPTION")
+        for sheet_name in excel_file.sheet_names:
+            if _normalize_label(sheet_name) == target_normalized:
+                target_sheet = sheet_name
+                break
+        if not target_sheet:
+            return None
+        product_df = excel_file.parse(target_sheet)
+    if product_df.empty:
+        return None
+    return product_df
+
+
 def target_brand_from_scope_df(scope_df):
     if scope_df is None or scope_df.empty:
         return None
@@ -151,6 +174,67 @@ def modelled_category_from_scope_df(scope_df):
                 return str(row.iloc[1])
 
     return None
+
+
+def _normalize_column_name(value: str) -> str:
+    return "".join(ch for ch in value.strip().lower() if ch.isalnum())
+
+
+def _find_column_by_candidates(df: pd.DataFrame, candidates: list[str]):
+    normalized_columns = {_normalize_column_name(str(col)): col for col in df.columns}
+    candidate_normalized = [_normalize_column_name(candidate) for candidate in candidates]
+    for candidate in candidate_normalized:
+        if candidate in normalized_columns:
+            return normalized_columns[candidate]
+    for column_key, column_name in normalized_columns.items():
+        for candidate in candidate_normalized:
+            if candidate in column_key or column_key in candidate:
+                return column_name
+    from difflib import get_close_matches
+
+    matches = get_close_matches(
+        " ".join(candidate_normalized),
+        list(normalized_columns.keys()),
+        n=1,
+        cutoff=0.75,
+    )
+    if matches:
+        return normalized_columns[matches[0]]
+    return None
+
+
+def target_brands_from_product_description(product_df: pd.DataFrame):
+    if product_df is None or product_df.empty:
+        return None
+    target_col = _find_column_by_candidates(product_df, ["Target Brand", "Target_Brand"])
+    brand_col = _find_column_by_candidates(product_df, ["Brand"])
+    if not target_col or not brand_col:
+        return None
+    target_values = product_df[target_col]
+
+    def is_target(value):
+        if pd.isna(value):
+            return False
+        try:
+            return float(value) == 1
+        except (TypeError, ValueError):
+            text = str(value).strip().lower()
+            return text in {"1", "yes", "y", "true", "t"}
+
+    brands = []
+    seen = set()
+    for _, row in product_df.iterrows():
+        if not is_target(row[target_col]):
+            continue
+        brand_value = row[brand_col]
+        if pd.isna(brand_value):
+            continue
+        brand_name = str(brand_value).strip()
+        if not brand_name or brand_name in seen:
+            continue
+        seen.add(brand_name)
+        brands.append(brand_name)
+    return brands or None
 
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
@@ -261,6 +345,26 @@ def append_text_after_label(slide, label_text, appended_text):
             new_run = paragraph.add_run()
             new_run.text = f"{spacer}{appended_text}"
             return True
+    return False
+
+
+def append_paragraph_after_label(slide, label_text, appended_text):
+    if not appended_text:
+        return False
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        text_frame = shape.text_frame
+        if label_text not in text_frame.text:
+            continue
+        if any(paragraph.text.strip() == appended_text for paragraph in text_frame.paragraphs):
+            return True
+        for paragraph in text_frame.paragraphs:
+            if label_text in paragraph.text:
+                new_paragraph = text_frame.add_paragraph()
+                new_paragraph.text = appended_text
+                paragraph._p.addnext(new_paragraph._p)
+                return True
     return False
 
 def add_table(slide, table_name, df: pd.DataFrame):
@@ -457,6 +561,7 @@ def build_pptx_from_template(
     target_brand=None,
     project_name=None,
     scope_df=None,
+    product_description_df=None,
 ):
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
@@ -491,6 +596,13 @@ def build_pptx_from_template(
         modelled_category = modelled_category_from_scope_df(scope_df)
         if modelled_category:
             append_text_after_label(slide4, "Modelled Category:", modelled_category)
+        target_brands = target_brands_from_product_description(product_description_df)
+        if target_brands:
+            append_paragraph_after_label(
+                slide4,
+                "Modelled Category:",
+                f"Target Brand(s): {', '.join(target_brands)}",
+            )
         time_period, week_count = _format_modelling_period(df, scope_df)
         set_time_period_text(slide4, "TIME PERIOD", time_period, week_count)
         remove_empty_placeholders(slide4)
@@ -644,6 +756,7 @@ def generate_deck(
     try:
         df = df_from_contents(data_contents, data_name)
         scope_df = scope_df_from_contents(scope_contents, scope_name)
+        product_description_df = product_description_df_from_contents(scope_contents, scope_name)
         target_brand = target_brand_from_scope_df(scope_df)
         template_bytes = template_path.read_bytes()
 
@@ -653,6 +766,7 @@ def generate_deck(
             target_brand,
             project_name,
             scope_df,
+            product_description_df,
         )
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
