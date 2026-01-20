@@ -729,6 +729,8 @@ def build_pptx_from_template(
     if project_name == "MMx" and scope_df is not None:
         year_range = _format_study_year_range(scope_df)
         replace_text_in_slide_preserve_formatting(slide1, "<RANGE>", year_range)
+        generation_date = date.today().strftime("%b %d, %Y")
+        replace_text_in_slide_preserve_formatting(slide1, "<DATE>", generation_date)
     remove_empty_placeholders(slide1)
 
     # Assume Slide 2 is for a KPI table and a chart
