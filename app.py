@@ -224,6 +224,60 @@ def _find_column_by_candidates(df: pd.DataFrame, candidates: list[str]):
     return None
 
 
+def _is_target_flag(value):
+    if pd.isna(value):
+        return False
+    try:
+        return float(value) == 1
+    except (TypeError, ValueError):
+        text = str(value).strip().lower()
+        return text in {"1", "yes", "y", "true", "t"}
+
+
+def _target_values_from_scope(
+    scope_df: pd.DataFrame,
+    target_col_candidates: list[str],
+    value_col_candidates: list[str],
+):
+    if scope_df is None or scope_df.empty:
+        return None
+    target_col = _find_column_by_candidates(scope_df, target_col_candidates)
+    value_col = _find_column_by_candidates(scope_df, value_col_candidates)
+    if not target_col or not value_col:
+        return None
+
+    values = []
+    seen = set()
+    for _, row in scope_df.iterrows():
+        if not _is_target_flag(row[target_col]):
+            continue
+        value = row[value_col]
+        if pd.isna(value):
+            continue
+        name = str(value).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        values.append(name)
+    return values or None
+
+
+def target_brands_from_scope_df(scope_df: pd.DataFrame):
+    return _target_values_from_scope(
+        scope_df,
+        ["Target Brand", "Target_Brand"],
+        ["Brand", "Brand Name"],
+    )
+
+
+def target_manufacturers_from_scope_df(scope_df: pd.DataFrame):
+    return _target_values_from_scope(
+        scope_df,
+        ["Target Manufacturer", "Target_Manufacturer", "Target Mfr", "Target Mfg"],
+        ["Manufacturer", "Mfr", "Mfg"],
+    )
+
+
 def target_brands_from_product_description(product_df: pd.DataFrame):
     if product_df is None or product_df.empty:
         return None
@@ -231,21 +285,11 @@ def target_brands_from_product_description(product_df: pd.DataFrame):
     brand_col = _find_column_by_candidates(product_df, ["Brand"])
     if not target_col or not brand_col:
         return None
-    target_values = product_df[target_col]
-
-    def is_target(value):
-        if pd.isna(value):
-            return False
-        try:
-            return float(value) == 1
-        except (TypeError, ValueError):
-            text = str(value).strip().lower()
-            return text in {"1", "yes", "y", "true", "t"}
 
     brands = []
     seen = set()
     for _, row in product_df.iterrows():
-        if not is_target(row[target_col]):
+        if not _is_target_flag(row[target_col]):
             continue
         brand_value = row[brand_col]
         if pd.isna(brand_value):
@@ -617,7 +661,16 @@ def build_pptx_from_template(
         modelled_category = modelled_category_from_scope_df(scope_df)
         if modelled_category:
             append_text_after_label(slide4, "Modelled Category:", modelled_category)
-        target_brands = target_brands_from_product_description(product_description_df)
+        target_manufacturers = target_manufacturers_from_scope_df(scope_df)
+        if target_manufacturers:
+            append_paragraph_after_label(
+                slide4,
+                "Modelled Category:",
+                f"Target Manufacturer(s): {', '.join(target_manufacturers)}",
+            )
+        target_brands = target_brands_from_scope_df(scope_df) or target_brands_from_product_description(
+            product_description_df
+        )
         if target_brands:
             append_paragraph_after_label(
                 slide4,
