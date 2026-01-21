@@ -1,6 +1,7 @@
 # app.py
 import io
 import base64
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from pptx.enum.chart import XL_CHART_TYPE
 app = Dash(__name__)
 app.title = "Deck Automator (MVP)"
 server = app.server
+logger = logging.getLogger(__name__)
 TEMPLATE_DIR = Path(__file__).resolve().parent / "assets" / "templates"
 PROJECT_TEMPLATES = {
     "PnP": TEMPLATE_DIR / "PnP.pptx",
@@ -1345,8 +1347,12 @@ def generate_deck(
         )
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
-    except Exception as e:
-        return no_update, f"Error: {e}"
+    except Exception as exc:
+        logger.exception("Deck generation failed.")
+        message = str(exc).strip()
+        if not message:
+            message = "Unknown error. Check server logs for details."
+        return no_update, f"Error ({type(exc).__name__}): {message}"
 
 # Important: Dash's dcc.send_bytes expects a writer function; we provide inline:
 def _writer(f):
