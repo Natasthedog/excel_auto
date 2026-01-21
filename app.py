@@ -905,46 +905,64 @@ def _modelling_period_bounds(scope_df: pd.DataFrame) -> tuple[date, date]:
     return earliest_date, latest_date
 
 
-def _replace_modelling_period_placeholders(waterfall_df: pd.DataFrame, scope_df: pd.DataFrame):
-    if scope_df is None or waterfall_df is None or waterfall_df.empty:
-        return waterfall_df
+def _replace_modelling_period_placeholders_in_categories(
+    categories: list[str],
+    scope_df: pd.DataFrame | None,
+) -> list[str]:
+    if scope_df is None or not categories:
+        return categories
     try:
         start_date, end_date = _modelling_period_bounds(scope_df)
     except Exception:
-        return waterfall_df
+        return categories
     earliest = start_date.strftime("%b %d, %Y")
     latest = end_date.strftime("%b %d, %Y")
-
-    def replace_value(value):
-        if pd.isna(value):
-            return value
-        text = str(value)
+    updated = []
+    for value in categories:
+        text = "" if value is None else str(value)
         if "<earliest date>" in text or "<latest date>" in text:
             text = text.replace("<earliest date>", earliest)
             text = text.replace("<latest date>", latest)
-        return text
+        updated.append(text)
+    return updated
 
-    waterfall_df["Vars"] = waterfall_df["Vars"].apply(replace_value)
-    return waterfall_df
+
+def _waterfall_chart_from_slide(slide, chart_name: str):
+    for shape in slide.shapes:
+        if shape.has_chart and chart_name in (getattr(shape, "name", "") or ""):
+            return shape.chart
+    for shape in slide.shapes:
+        if shape.has_chart:
+            return shape.chart
+    return None
+
+
+def _categories_from_chart(chart) -> list[str]:
+    categories = []
+    try:
+        plot_categories = chart.plots[0].categories
+    except Exception:
+        plot_categories = []
+    for category in plot_categories:
+        label = getattr(category, "label", None)
+        categories.append(str(label) if label is not None else str(category))
+    return categories
 
 
 def populate_category_waterfall(prs, gathered_df: pd.DataFrame, scope_df: pd.DataFrame | None = None):
     slide = _find_slide_by_marker(prs, "<Waterfall Template>")
     if slide is None:
         raise ValueError("Could not find the <Waterfall Template> slide in the template.")
-    replace_text_in_slide(slide, "<Waterfall Template>", "Waterfall Template")
-    waterfall_df = _build_category_waterfall_df(gathered_df)
-    waterfall_df = _replace_modelling_period_placeholders(waterfall_df, scope_df)
-    categories = waterfall_df["Vars"].tolist()
-    series_order = ["Base", "Promo", "Media", "Blanks", "Positives", "Negatives"]
-    series_dict = {key: waterfall_df[key].tolist() for key in series_order if key in waterfall_df}
-    update_or_add_waterfall_chart(
-        slide,
-        "Waterfall Template",
-        categories,
-        series_dict,
-    )
-    remove_empty_placeholders(slide)
+    chart = _waterfall_chart_from_slide(slide, "Waterfall Template")
+    if chart is None:
+        raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
+    categories = _categories_from_chart(chart)
+    categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
+    cd = ChartData()
+    cd.categories = categories
+    for series in chart.series:
+        cd.add_series(series.name, list(series.values))
+    chart.replace_data(cd)
 
 def build_pptx_from_template(
     template_bytes,
