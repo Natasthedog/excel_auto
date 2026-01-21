@@ -91,8 +91,11 @@ def bytes_from_contents(contents):
 
 def df_from_contents(contents, filename):
     decoded = bytes_from_contents(contents)
-    if filename.lower().endswith((".xlsx", ".xls")):
-        return pd.read_excel(io.BytesIO(decoded))
+    if filename.lower().endswith((".xlsx", ".xls", ".xlsb")):
+        read_options = {}
+        if filename.lower().endswith(".xlsb"):
+            read_options["engine"] = "pyxlsb"
+        return pd.read_excel(io.BytesIO(decoded), **read_options)
     elif filename.lower().endswith(".csv"):
         return pd.read_csv(io.StringIO(decoded.decode('utf-8')))
     else:
@@ -960,11 +963,11 @@ app.layout = html.Div(
             style={"marginBottom": "18px"},
         ),
         html.Div([
-            html.Label("Upload gatheredCN10 file (.xlsx or .csv):"),
+            html.Label("Upload gatheredCN10 file (.xlsx, .xlsb, or .csv):"),
             dcc.Upload(
                 id="data-upload",
                 children=html.Div(["Drag & Drop or ", html.A("Select File")]),
-                accept=".xlsx,.xls,.csv",
+                accept=".xlsx,.xls,.xlsb,.csv",
                 multiple=False,
                 style={
                     "padding":"20px",
