@@ -397,45 +397,6 @@ def _find_slide_by_marker(prs, marker_text: str):
     return None
 
 
-def _duplicate_slide(prs, slide):
-    from copy import deepcopy
-
-    slide_layout = slide.slide_layout
-    new_slide = prs.slides.add_slide(slide_layout)
-
-    for shape in list(new_slide.shapes):
-        shape._element.getparent().remove(shape._element)
-
-    for shape in slide.shapes:
-        new_slide.shapes._spTree.insert_element_before(
-            deepcopy(shape._element), "p:extLst"
-        )
-
-    for rel in list(new_slide.part.rels.values()):
-        if "notesSlide" in rel.reltype:
-            del new_slide.part.rels._rels[rel.rId]
-
-    for rel in slide.part.rels.values():
-        reltype = rel.reltype
-        if "notesSlide" in reltype or "slideLayout" in reltype:
-            continue
-        if rel.is_external:
-            new_slide.part.rels._add_relationship(
-                reltype,
-                rel.target_ref,
-                rel.rId,
-                is_external=True,
-            )
-        else:
-            new_slide.part.rels._add_relationship(
-                reltype,
-                rel._target,
-                rel.rId,
-            )
-
-    return new_slide
-
-
 def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
     vars_col = _find_column_by_candidates(
         gathered_df,
@@ -978,6 +939,16 @@ def _waterfall_chart_from_slide(slide, chart_name: str):
     return None
 
 
+def _waterfall_chart_shape_from_slide(slide, chart_name: str):
+    for shape in slide.shapes:
+        if shape.has_chart and chart_name in (getattr(shape, "name", "") or ""):
+            return shape
+    for shape in slide.shapes:
+        if shape.has_chart:
+            return shape
+    return None
+
+
 def _categories_from_chart(chart) -> list[str]:
     categories = []
     try:
@@ -988,6 +959,44 @@ def _categories_from_chart(chart) -> list[str]:
         label = getattr(category, "label", None)
         categories.append(str(label) if label is not None else str(category))
     return categories
+
+
+def _build_waterfall_chart_data(chart, scope_df: pd.DataFrame | None) -> ChartData:
+    categories = _categories_from_chart(chart)
+    categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
+    cd = ChartData()
+    cd.categories = categories
+    for series in chart.series:
+        cd.add_series(series.name, list(series.values))
+    return cd
+
+
+def _add_waterfall_chart_from_template(
+    slide,
+    template_slide,
+    scope_df: pd.DataFrame | None,
+    chart_name: str,
+):
+    template_shape = _waterfall_chart_shape_from_slide(template_slide, chart_name)
+    if template_shape is None:
+        raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
+    template_chart = template_shape.chart
+    cd = _build_waterfall_chart_data(template_chart, scope_df)
+    chart_type = getattr(
+        template_chart,
+        "chart_type",
+        getattr(XL_CHART_TYPE, "WATERFALL", XL_CHART_TYPE.COLUMN_STACKED),
+    )
+    chart_shape = slide.shapes.add_chart(
+        chart_type,
+        template_shape.left,
+        template_shape.top,
+        template_shape.width,
+        template_shape.height,
+        cd,
+    )
+    chart_shape.name = getattr(template_shape, "name", chart_name)
+    return chart_shape
 
 
 def _set_waterfall_slide_header(slide, label: str) -> None:
@@ -1011,12 +1020,7 @@ def _update_waterfall_chart(slide, scope_df: pd.DataFrame | None) -> None:
     chart = _waterfall_chart_from_slide(slide, "Waterfall Template")
     if chart is None:
         raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
-    categories = _categories_from_chart(chart)
-    categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
-    cd = ChartData()
-    cd.categories = categories
-    for series in chart.series:
-        cd.add_series(series.name, list(series.values))
+    cd = _build_waterfall_chart_data(chart, scope_df)
     chart.replace_data(cd)
 
 
@@ -1026,19 +1030,24 @@ def populate_category_waterfall(
     scope_df: pd.DataFrame | None = None,
     target_labels: list[str] | None = None,
 ):
-    slide = _find_slide_by_marker(prs, "<Waterfall Template>")
-    if slide is None:
+    template_slide = _find_slide_by_marker(prs, "<Waterfall Template>")
+    if template_slide is None:
         raise ValueError("Could not find the <Waterfall Template> slide in the template.")
     labels = target_labels or _target_level_labels_from_gathered_df(gathered_df)
     if not labels:
         return
-    first_slide = slide
+    first_slide = template_slide
     _set_waterfall_slide_header(first_slide, labels[0])
     _update_waterfall_chart(first_slide, scope_df)
     for label in labels[1:]:
-        new_slide = _duplicate_slide(prs, slide)
+        new_slide = prs.slides.add_slide(template_slide.slide_layout)
         _set_waterfall_slide_header(new_slide, label)
-        _update_waterfall_chart(new_slide, scope_df)
+        _add_waterfall_chart_from_template(
+            new_slide,
+            template_slide,
+            scope_df,
+            "Waterfall Template",
+        )
 
 def build_pptx_from_template(
     template_bytes,
@@ -1127,7 +1136,8 @@ def build_pptx_from_template(
                 waterfall_targets,
             )
         except Exception:
-            pass
+            logger.exception("Failed to populate category waterfall slides.")
+            raise
 
     # Return bytes
     out = io.BytesIO()
