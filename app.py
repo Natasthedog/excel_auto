@@ -411,6 +411,10 @@ def _duplicate_slide(prs, slide):
             deepcopy(shape._element), "p:extLst"
         )
 
+    for rel in list(new_slide.part.rels.values()):
+        if "notesSlide" in rel.reltype:
+            del new_slide.part.rels._rels[rel.rId]
+
     for rel in slide.part.rels.values():
         reltype = rel.reltype
         if "notesSlide" in reltype or "slideLayout" in reltype:
