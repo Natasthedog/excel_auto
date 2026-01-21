@@ -395,6 +395,28 @@ def _find_slide_by_marker(prs, marker_text: str):
     return None
 
 
+def _duplicate_slide(prs, slide):
+    from copy import deepcopy
+
+    slide_layout = slide.slide_layout
+    new_slide = prs.slides.add_slide(slide_layout)
+
+    for shape in list(new_slide.shapes):
+        shape._element.getparent().remove(shape._element)
+
+    for shape in slide.shapes:
+        new_slide.shapes._spTree.insert_element_before(
+            deepcopy(shape._element), "p:extLst"
+        )
+
+    for rel in slide.part.rels.values():
+        if "notesSlide" in rel.reltype:
+            continue
+        new_slide.part.rels.add_relationship(rel.reltype, rel._target, rel.rId)
+
+    return new_slide
+
+
 def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
     vars_col = _find_column_by_candidates(
         gathered_df,
@@ -949,10 +971,24 @@ def _categories_from_chart(chart) -> list[str]:
     return categories
 
 
-def populate_category_waterfall(prs, gathered_df: pd.DataFrame, scope_df: pd.DataFrame | None = None):
-    slide = _find_slide_by_marker(prs, "<Waterfall Template>")
-    if slide is None:
-        raise ValueError("Could not find the <Waterfall Template> slide in the template.")
+def _set_waterfall_slide_header(slide, label: str) -> None:
+    title_text = f"{label} Waterfall"
+    replaced = replace_text_in_slide_preserve_formatting(
+        slide, "<Waterfall Template>", title_text
+    )
+    replaced = (
+        replace_text_in_slide_preserve_formatting(slide, "Waterfall Template", title_text)
+        or replaced
+    )
+    if replaced:
+        return
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            shape.text_frame.text = title_text
+            return
+
+
+def _update_waterfall_chart(slide, scope_df: pd.DataFrame | None) -> None:
     chart = _waterfall_chart_from_slide(slide, "Waterfall Template")
     if chart is None:
         raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
@@ -964,6 +1000,27 @@ def populate_category_waterfall(prs, gathered_df: pd.DataFrame, scope_df: pd.Dat
         cd.add_series(series.name, list(series.values))
     chart.replace_data(cd)
 
+
+def populate_category_waterfall(
+    prs,
+    gathered_df: pd.DataFrame,
+    scope_df: pd.DataFrame | None = None,
+    target_labels: list[str] | None = None,
+):
+    slide = _find_slide_by_marker(prs, "<Waterfall Template>")
+    if slide is None:
+        raise ValueError("Could not find the <Waterfall Template> slide in the template.")
+    labels = target_labels or _target_level_labels_from_gathered_df(gathered_df)
+    if not labels:
+        return
+    first_slide = slide
+    _set_waterfall_slide_header(first_slide, labels[0])
+    _update_waterfall_chart(first_slide, scope_df)
+    for label in labels[1:]:
+        new_slide = _duplicate_slide(prs, slide)
+        _set_waterfall_slide_header(new_slide, label)
+        _update_waterfall_chart(new_slide, scope_df)
+
 def build_pptx_from_template(
     template_bytes,
     df,
@@ -971,6 +1028,7 @@ def build_pptx_from_template(
     project_name=None,
     scope_df=None,
     product_description_df=None,
+    waterfall_targets=None,
 ):
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
@@ -1043,7 +1101,12 @@ def build_pptx_from_template(
 
     if project_name == "MMx":
         try:
-            populate_category_waterfall(prs, df, scope_df)
+            populate_category_waterfall(
+                prs,
+                df,
+                scope_df,
+                waterfall_targets,
+            )
         except Exception:
             pass
 
@@ -1265,6 +1328,7 @@ def generate_deck(
             project_name,
             scope_df,
             product_description_df,
+            waterfall_targets,
         )
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
