@@ -824,10 +824,11 @@ app.layout = html.Div(
             style={"marginBottom": "18px"},
         ),
         html.Div([
-            html.Label("Upload data (CSV/XLSX):"),
+            html.Label("Upload gatheredCN10 file (.xlsx or .csv):"),
             dcc.Upload(
                 id="data-upload",
                 children=html.Div(["Drag & Drop or ", html.A("Select File")]),
+                accept=".xlsx,.xls,.csv",
                 multiple=False,
                 style={
                     "padding":"20px",
@@ -838,7 +839,7 @@ app.layout = html.Div(
             ),
             html.Div(
                 id="data-upload-status",
-                children=render_upload_status(None, "Data upload complete"),
+                children=render_upload_status(None, "gatheredCN10 upload complete"),
                 style={"marginBottom":"12px"},
             ),
         ], style={"marginBottom":"18px"}),
@@ -876,8 +877,8 @@ app.layout = html.Div(
 )
 def show_data_upload_status(contents, filename):
     if not contents:
-        return render_upload_status(None, "Data upload complete")
-    return render_upload_status(filename, "Data upload complete")
+        return render_upload_status(None, "gatheredCN10 upload complete")
+    return render_upload_status(filename, "gatheredCN10 upload complete")
 
 @callback(
     Output("scope-upload-status", "children"),
