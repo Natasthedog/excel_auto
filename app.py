@@ -227,6 +227,36 @@ def _find_column_by_candidates(df: pd.DataFrame, candidates: list[str]):
     return None
 
 
+def _find_column_by_row_values(row: pd.Series, candidates: list[str]):
+    normalized_values = {}
+    for column, value in row.items():
+        if pd.isna(value):
+            continue
+        normalized_values[_normalize_column_name(str(value))] = column
+    if not normalized_values:
+        return None
+
+    candidate_normalized = [_normalize_column_name(candidate) for candidate in candidates]
+    for candidate in candidate_normalized:
+        if candidate in normalized_values:
+            return normalized_values[candidate]
+    for value_key, column_name in normalized_values.items():
+        for candidate in candidate_normalized:
+            if candidate in value_key or value_key in candidate:
+                return column_name
+    from difflib import get_close_matches
+
+    matches = get_close_matches(
+        " ".join(candidate_normalized),
+        list(normalized_values.keys()),
+        n=1,
+        cutoff=0.75,
+    )
+    if matches:
+        return normalized_values[matches[0]]
+    return None
+
+
 def _is_target_flag(value):
     if pd.isna(value):
         return False
@@ -438,10 +468,19 @@ def _target_level_labels_from_gathered_df(gathered_df: pd.DataFrame) -> list[str
         gathered_df,
         ["Target Level Label", "Target Level", "Target Label"],
     )
+    data_start_idx = 0
+    if not label_col and len(gathered_df) > 1:
+        header_row = gathered_df.iloc[1]
+        label_col = _find_column_by_row_values(
+            header_row,
+            ["Target Level Label", "Target Level", "Target Label"],
+        )
+        if label_col:
+            data_start_idx = 2
     if not label_col:
         raise ValueError("The gatheredCN10 file is missing the Target Level Label column.")
     labels = (
-        gathered_df[label_col]
+        gathered_df.iloc[data_start_idx:][label_col]
         .dropna()
         .astype(str)
         .map(str.strip)
