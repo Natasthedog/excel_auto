@@ -927,10 +927,10 @@ def _replace_modelling_period_placeholders(waterfall_df: pd.DataFrame, scope_df:
 
 
 def populate_category_waterfall(prs, gathered_df: pd.DataFrame, scope_df: pd.DataFrame | None = None):
-    slide = _find_slide_by_marker(prs, "<Category Waterfall>")
+    slide = _find_slide_by_marker(prs, "<Waterfall Template>")
     if slide is None:
-        raise ValueError("Could not find the <Category Waterfall> slide in the template.")
-    replace_text_in_slide(slide, "<Category Waterfall>", "Category Waterfall")
+        raise ValueError("Could not find the <Waterfall Template> slide in the template.")
+    replace_text_in_slide(slide, "<Waterfall Template>", "Waterfall Template")
     waterfall_df = _build_category_waterfall_df(gathered_df)
     waterfall_df = _replace_modelling_period_placeholders(waterfall_df, scope_df)
     categories = waterfall_df["Vars"].tolist()
@@ -938,7 +938,7 @@ def populate_category_waterfall(prs, gathered_df: pd.DataFrame, scope_df: pd.Dat
     series_dict = {key: waterfall_df[key].tolist() for key in series_order if key in waterfall_df}
     update_or_add_waterfall_chart(
         slide,
-        "Category Waterfall",
+        "Waterfall Template",
         categories,
         series_dict,
     )
@@ -1272,3 +1272,4 @@ def finalize_download(status_text, data_contents):
 
 if __name__ == "__main__":
     app.run(debug=True)
+
