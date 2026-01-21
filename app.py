@@ -893,12 +893,46 @@ def set_time_period_text(slide, label_text, time_period, week_count):
     return False
 
 
-def populate_category_waterfall(prs, gathered_df: pd.DataFrame):
+def _modelling_period_bounds(scope_df: pd.DataFrame) -> tuple[date, date]:
+    start_company_week = _find_company_week_value(scope_df, "First week of modelling")
+    end_company_week = _find_company_week_value(scope_df, "Last week of modelling")
+    start_yearwk = _coerce_yearwk(start_company_week)
+    end_yearwk = _coerce_yearwk(end_company_week)
+    start_date = CompanyWeekMapper._yearwk_to_monday(start_yearwk)
+    end_date = CompanyWeekMapper._yearwk_to_monday(end_yearwk) + timedelta(days=6)
+    return start_date, end_date
+
+
+def _replace_modelling_period_placeholders(waterfall_df: pd.DataFrame, scope_df: pd.DataFrame):
+    if scope_df is None or waterfall_df is None or waterfall_df.empty:
+        return waterfall_df
+    try:
+        start_date, end_date = _modelling_period_bounds(scope_df)
+    except Exception:
+        return waterfall_df
+    earliest = start_date.strftime("%b %d, %Y")
+    latest = end_date.strftime("%b %d, %Y")
+
+    def replace_value(value):
+        if pd.isna(value):
+            return value
+        text = str(value)
+        if "<earliest date>" in text or "<latest date>" in text:
+            text = text.replace("<earliest date>", earliest)
+            text = text.replace("<latest date>", latest)
+        return text
+
+    waterfall_df["Vars"] = waterfall_df["Vars"].apply(replace_value)
+    return waterfall_df
+
+
+def populate_category_waterfall(prs, gathered_df: pd.DataFrame, scope_df: pd.DataFrame | None = None):
     slide = _find_slide_by_marker(prs, "<Category Waterfall>")
     if slide is None:
         raise ValueError("Could not find the <Category Waterfall> slide in the template.")
     replace_text_in_slide(slide, "<Category Waterfall>", "Category Waterfall")
     waterfall_df = _build_category_waterfall_df(gathered_df)
+    waterfall_df = _replace_modelling_period_placeholders(waterfall_df, scope_df)
     categories = waterfall_df["Vars"].tolist()
     series_order = ["Base", "Promo", "Media", "Blanks", "Positives", "Negatives"]
     series_dict = {key: waterfall_df[key].tolist() for key in series_order if key in waterfall_df}
@@ -989,7 +1023,7 @@ def build_pptx_from_template(
 
     if project_name == "MMx":
         try:
-            populate_category_waterfall(prs, df)
+            populate_category_waterfall(prs, df, scope_df)
         except Exception:
             pass
 
