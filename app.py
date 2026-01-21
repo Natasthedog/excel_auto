@@ -898,9 +898,11 @@ def _modelling_period_bounds(scope_df: pd.DataFrame) -> tuple[date, date]:
     end_company_week = _find_company_week_value(scope_df, "Last week of modelling")
     start_yearwk = _coerce_yearwk(start_company_week)
     end_yearwk = _coerce_yearwk(end_company_week)
-    start_date = CompanyWeekMapper._yearwk_to_monday(start_yearwk)
-    end_date = CompanyWeekMapper._yearwk_to_monday(end_yearwk) + timedelta(days=6)
-    return start_date, end_date
+    earliest_yearwk = min(start_yearwk, end_yearwk)
+    latest_yearwk = max(start_yearwk, end_yearwk)
+    earliest_date = CompanyWeekMapper._yearwk_to_monday(earliest_yearwk)
+    latest_date = CompanyWeekMapper._yearwk_to_monday(latest_yearwk) + timedelta(days=6)
+    return earliest_date, latest_date
 
 
 def _replace_modelling_period_placeholders(waterfall_df: pd.DataFrame, scope_df: pd.DataFrame):
