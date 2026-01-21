@@ -431,6 +431,30 @@ def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
 
     return waterfall_df
 
+def _target_level_labels_from_gathered_df(gathered_df: pd.DataFrame) -> list[str]:
+    if gathered_df is None or gathered_df.empty:
+        return []
+    label_col = _find_column_by_candidates(
+        gathered_df,
+        ["Target Level Label", "Target Level", "Target Label"],
+    )
+    if not label_col:
+        raise ValueError("The gatheredCN10 file is missing the Target Level Label column.")
+    labels = (
+        gathered_df[label_col]
+        .dropna()
+        .astype(str)
+        .map(str.strip)
+    )
+    unique_labels = []
+    seen = set()
+    for label in labels:
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        unique_labels.append(label)
+    return unique_labels
+
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
     If a chart with name=chart_name exists on the slide, update its data.
@@ -1027,7 +1051,9 @@ app.layout = html.Div(
         ], style={"marginBottom":"18px"}),
         html.Div(
             [
-                html.Label("Which targets should be included in the waterfalls?"),
+                html.Label(
+                    "Which Target Level Label values should be included in the waterfalls?"
+                ),
                 dcc.Checklist(
                     id="waterfall-targets",
                     options=[],
@@ -1073,23 +1099,26 @@ def show_scope_upload_status(contents, filename):
     Output("waterfall-targets", "options"),
     Output("waterfall-targets", "value"),
     Output("waterfall-targets-status", "children"),
-    Input("scope-upload", "contents"),
-    State("scope-upload", "filename"),
+    Input("data-upload", "contents"),
+    State("data-upload", "filename"),
 )
 def populate_waterfall_targets(contents, filename):
     if not contents:
-        return [], [], "Upload a scope file to load targets from the Product Description tab."
+        return [], [], "Upload a gatheredCN10 file to load Target Level Label values."
     try:
-        product_description_df = product_description_df_from_contents(contents, filename)
+        gathered_df = df_from_contents(contents, filename)
     except Exception as exc:
-        return [], [], f"Error reading scope file: {exc}"
-    if product_description_df is None:
-        return [], [], "No Product Description tab was found in the scope file."
-    target_lines = target_lines_from_product_description(product_description_df)
-    if not target_lines:
-        return [], [], "No target lines were identified in the Product Description tab."
-    options = [{"label": line, "value": line} for line in target_lines]
-    return options, target_lines, f"Found {len(target_lines)} target(s)."
+        return [], [], f"Error reading gatheredCN10 file: {exc}"
+    if gathered_df is None or gathered_df.empty:
+        return [], [], "The gatheredCN10 file is empty."
+    try:
+        target_labels = _target_level_labels_from_gathered_df(gathered_df)
+    except Exception as exc:
+        return [], [], f"Error finding Target Level Label values: {exc}"
+    if not target_labels:
+        return [], [], "No Target Level Label values were found in the gatheredCN10 file."
+    options = [{"label": label, "value": label} for label in target_labels]
+    return options, target_labels, f"Found {len(target_labels)} Target Level Label value(s)."
 
 @callback(
     Output("download","data"),
