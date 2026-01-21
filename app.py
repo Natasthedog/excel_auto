@@ -350,6 +350,84 @@ def target_dimensions_from_product_description(product_df: pd.DataFrame) -> list
 def target_lines_from_product_description(product_df: pd.DataFrame) -> list[str]:
     return target_dimensions_from_product_description(product_df)
 
+def _find_slide_by_marker(prs, marker_text: str):
+    marker_text = marker_text.strip()
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            shape_name = getattr(shape, "name", "") or ""
+            if marker_text and marker_text in shape_name:
+                return slide
+            if shape.has_text_frame and marker_text in shape.text_frame.text:
+                return slide
+    return None
+
+
+def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
+    vars_col = _find_column_by_candidates(
+        gathered_df,
+        ["Vars", "Var", "Variable", "Variable Name", "Bucket", "Driver"],
+    )
+    if not vars_col:
+        raise ValueError("The gatheredCN10 file is missing a Vars/Variable column for the waterfall.")
+
+    series_candidates = {
+        "Base": ["Base"],
+        "Promo": ["Promo", "Promotion", "Promotions"],
+        "Media": ["Media"],
+        "Blanks": ["Blanks", "Blank"],
+        "Positives": ["Positives", "Positive", "Pos"],
+        "Negatives": ["Negatives", "Negative", "Neg"],
+    }
+    series_columns = {}
+    missing = []
+    for key, candidates in series_candidates.items():
+        found = _find_column_by_candidates(gathered_df, candidates)
+        if not found:
+            missing.append(key)
+        else:
+            series_columns[key] = found
+    if missing:
+        raise ValueError(
+            "The gatheredCN10 file is missing waterfall columns: "
+            + ", ".join(missing)
+        )
+
+    label_candidates = {
+        "labs-Base": ["labs-Base", "labs Base", "labels-Base", "labels Base"],
+        "labs-Promo": ["labs-Promo", "labs Promo", "labels-Promo", "labels Promo"],
+        "labs-Media": ["labs-Media", "labs Media", "labels-Media", "labels Media"],
+        "labs-Blanks": ["labs-Blanks", "labs Blanks", "labels-Blanks", "labels Blanks"],
+        "labs-Positives": [
+            "labs-Positives",
+            "labs Positives",
+            "labels-Positives",
+            "labels Positives",
+        ],
+        "labs-Negatives": [
+            "labs-Negatives",
+            "labs Negatives",
+            "labels-Negatives",
+            "labels Negatives",
+        ],
+    }
+    label_columns = {}
+    for key, candidates in label_candidates.items():
+        found = _find_column_by_candidates(gathered_df, candidates)
+        if found:
+            label_columns[key] = found
+
+    ordered_cols = [vars_col] + [series_columns[key] for key in series_candidates]
+    ordered_cols += list(label_columns.values())
+    waterfall_df = gathered_df.loc[:, ordered_cols].copy()
+    rename_map = {vars_col: "Vars", **{v: k for k, v in series_columns.items()}}
+    rename_map.update({v: k for k, v in label_columns.items()})
+    waterfall_df = waterfall_df.rename(columns=rename_map)
+
+    for key in series_candidates:
+        waterfall_df[key] = pd.to_numeric(waterfall_df[key], errors="coerce").fillna(0)
+
+    return waterfall_df
+
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
     If a chart with name=chart_name exists on the slide, update its data.
@@ -399,6 +477,40 @@ def update_or_add_column_chart(slide, chart_name, categories, series_dict):
         # Light touch formatting; rely on template/theme for styling
         chart.has_legend = True
         return chart
+
+def update_or_add_waterfall_chart(slide, chart_name, categories, series_dict):
+    """
+    Update an existing waterfall chart or insert one if missing.
+    """
+    chart_shape = None
+    for shape in slide.shapes:
+        if getattr(shape, "name", None) == chart_name and shape.has_chart:
+            chart_shape = shape
+            break
+
+    if chart_shape is None:
+        for shape in slide.shapes:
+            if shape.has_chart:
+                chart_shape = shape
+                shape.name = chart_name
+                break
+
+    cd = ChartData()
+    cd.categories = categories
+    for s_name, values in series_dict.items():
+        cd.add_series(s_name, list(values))
+
+    if chart_shape:
+        chart_shape.chart.replace_data(cd)
+        return chart_shape
+
+    waterfall_type = getattr(XL_CHART_TYPE, "WATERFALL", XL_CHART_TYPE.COLUMN_STACKED)
+    left, top, width, height = Inches(1), Inches(2), Inches(8), Inches(4.5)
+    chart_shape = slide.shapes.add_chart(
+        waterfall_type, left, top, width, height, cd
+    )
+    chart_shape.name = chart_name
+    return chart_shape
 
 def set_text_by_name(slide, shape_name, text):
     for shape in slide.shapes:
@@ -714,6 +826,24 @@ def set_time_period_text(slide, label_text, time_period, week_count):
         return True
     return False
 
+
+def populate_category_waterfall(prs, gathered_df: pd.DataFrame):
+    slide = _find_slide_by_marker(prs, "<Category Waterfall>")
+    if slide is None:
+        raise ValueError("Could not find the <Category Waterfall> slide in the template.")
+    replace_text_in_slide(slide, "<Category Waterfall>", "Category Waterfall")
+    waterfall_df = _build_category_waterfall_df(gathered_df)
+    categories = waterfall_df["Vars"].tolist()
+    series_order = ["Base", "Promo", "Media", "Blanks", "Positives", "Negatives"]
+    series_dict = {key: waterfall_df[key].tolist() for key in series_order if key in waterfall_df}
+    update_or_add_waterfall_chart(
+        slide,
+        "Category Waterfall",
+        categories,
+        series_dict,
+    )
+    remove_empty_placeholders(slide)
+
 def build_pptx_from_template(
     template_bytes,
     df,
@@ -770,6 +900,9 @@ def build_pptx_from_template(
         time_period, week_count = _format_modelling_period(df, scope_df)
         set_time_period_text(slide4, "TIME PERIOD", time_period, week_count)
         remove_empty_placeholders(slide4)
+
+    if project_name == "MMx":
+        populate_category_waterfall(prs, df)
 
     # Return bytes
     out = io.BytesIO()
