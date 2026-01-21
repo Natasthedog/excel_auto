@@ -347,6 +347,9 @@ def target_dimensions_from_product_description(product_df: pd.DataFrame) -> list
 
     return lines
 
+def target_lines_from_product_description(product_df: pd.DataFrame) -> list[str]:
+    return target_dimensions_from_product_description(product_df)
+
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
     If a chart with name=chart_name exists on the slide, update its data.
@@ -863,6 +866,23 @@ app.layout = html.Div(
                 style={"marginBottom":"12px"},
             ),
         ], style={"marginBottom":"18px"}),
+        html.Div(
+            [
+                html.Label("Which targets should be included in the waterfalls?"),
+                dcc.Checklist(
+                    id="waterfall-targets",
+                    options=[],
+                    value=[],
+                    labelStyle={"display": "block", "marginBottom": "6px"},
+                    inputStyle={"marginRight": "8px"},
+                ),
+                html.Div(
+                    id="waterfall-targets-status",
+                    style={"color": "#6B7280", "fontSize": "0.9rem", "marginTop": "6px"},
+                ),
+            ],
+            style={"marginBottom": "18px"},
+        ),
 
         html.Button("Generate Deck", id="go", n_clicks=0, style={"padding":"10px 16px","borderRadius":"10px"}),
         html.Div(id="status", style={"marginTop":"10px", "color":"#888"}),
@@ -891,6 +911,28 @@ def show_scope_upload_status(contents, filename):
     return render_upload_status(filename, "Scope upload complete")
 
 @callback(
+    Output("waterfall-targets", "options"),
+    Output("waterfall-targets", "value"),
+    Output("waterfall-targets-status", "children"),
+    Input("scope-upload", "contents"),
+    State("scope-upload", "filename"),
+)
+def populate_waterfall_targets(contents, filename):
+    if not contents:
+        return [], [], "Upload a scope file to load targets from the Product Description tab."
+    try:
+        product_description_df = product_description_df_from_contents(contents, filename)
+    except Exception as exc:
+        return [], [], f"Error reading scope file: {exc}"
+    if product_description_df is None:
+        return [], [], "No Product Description tab was found in the scope file."
+    target_lines = target_lines_from_product_description(product_description_df)
+    if not target_lines:
+        return [], [], "No target lines were identified in the Product Description tab."
+    options = [{"label": line, "value": line} for line in target_lines]
+    return options, target_lines, f"Found {len(target_lines)} target(s)."
+
+@callback(
     Output("download","data"),
     Output("status","children"),
     Input("go","n_clicks"),
@@ -899,6 +941,7 @@ def show_scope_upload_status(contents, filename):
     State("scope-upload", "contents"),
     State("scope-upload", "filename"),
     State("project-select", "value"),
+    State("waterfall-targets", "value"),
     prevent_initial_call=True
 )
 def generate_deck(
@@ -908,6 +951,7 @@ def generate_deck(
     scope_contents,
     scope_name,
     project_name,
+    waterfall_targets,
 ):
     if not data_contents or not project_name or not scope_contents:
         return no_update, "Please upload the data file, scope file, and select a project."
