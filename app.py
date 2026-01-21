@@ -863,8 +863,12 @@ def build_pptx_from_template(
     if target_brand:
         replace_text_in_slide(slide1, "Target Brand", target_brand)
     if project_name == "MMx" and scope_df is not None:
-        year_range = _format_study_year_range(scope_df)
-        replace_text_in_slide_preserve_formatting(slide1, "<RANGE>", year_range)
+        try:
+            year_range = _format_study_year_range(scope_df)
+        except Exception:
+            year_range = None
+        if year_range:
+            replace_text_in_slide_preserve_formatting(slide1, "<RANGE>", year_range)
         generation_date = date.today().strftime("%b %d, %Y")
         replace_text_in_slide_preserve_formatting(slide1, "<DATE>", generation_date)
     remove_empty_placeholders(slide1)
@@ -890,22 +894,41 @@ def build_pptx_from_template(
 
     if project_name == "MMx" and len(prs.slides) > 3:
         slide4 = prs.slides[3]
-        modelled_category = modelled_category_from_scope_df(scope_df)
-        if modelled_category:
-            append_text_after_label(slide4, "Modelled Category:", modelled_category)
-        target_dimensions = target_dimensions_from_product_description(product_description_df)
-        if target_dimensions:
-            append_paragraphs_after_label(
-                slide4,
-                "Modelled Category:",
-                target_dimensions,
-            )
-        time_period, week_count = _format_modelling_period(df, scope_df)
-        set_time_period_text(slide4, "TIME PERIOD", time_period, week_count)
+        if scope_df is not None:
+            try:
+                modelled_category = modelled_category_from_scope_df(scope_df)
+            except Exception:
+                modelled_category = None
+            if modelled_category:
+                append_text_after_label(slide4, "Modelled Category:", modelled_category)
+        if product_description_df is not None:
+            try:
+                target_dimensions = target_dimensions_from_product_description(
+                    product_description_df
+                )
+            except Exception:
+                target_dimensions = []
+            if target_dimensions:
+                append_paragraphs_after_label(
+                    slide4,
+                    "Modelled Category:",
+                    target_dimensions,
+                )
+        if scope_df is not None:
+            try:
+                time_period, week_count = _format_modelling_period(df, scope_df)
+            except Exception:
+                time_period = None
+                week_count = None
+            if time_period and week_count is not None:
+                set_time_period_text(slide4, "TIME PERIOD", time_period, week_count)
         remove_empty_placeholders(slide4)
 
     if project_name == "MMx":
-        populate_category_waterfall(prs, df)
+        try:
+            populate_category_waterfall(prs, df)
+        except Exception:
+            pass
 
     # Return bytes
     out = io.BytesIO()
@@ -1089,16 +1112,27 @@ def generate_deck(
     project_name,
     waterfall_targets,
 ):
-    if not data_contents or not project_name or not scope_contents:
-        return no_update, "Please upload the data file, scope file, and select a project."
+    if not data_contents or not project_name:
+        return no_update, "Please upload the data file and select a project."
 
     template_path = PROJECT_TEMPLATES.get(project_name)
     if not template_path or not template_path.exists():
         return no_update, "The selected project template could not be found."
     try:
         df = df_from_contents(data_contents, data_name)
-        scope_df = scope_df_from_contents(scope_contents, scope_name)
-        product_description_df = product_description_df_from_contents(scope_contents, scope_name)
+        scope_df = None
+        product_description_df = None
+        if scope_contents:
+            try:
+                scope_df = scope_df_from_contents(scope_contents, scope_name)
+            except Exception:
+                scope_df = None
+            try:
+                product_description_df = product_description_df_from_contents(
+                    scope_contents, scope_name
+                )
+            except Exception:
+                product_description_df = None
         target_brand = target_brand_from_scope_df(scope_df)
         template_bytes = template_path.read_bytes()
 
