@@ -469,14 +469,14 @@ def _target_level_labels_from_gathered_df(gathered_df: pd.DataFrame) -> list[str
         ["Target Level Label", "Target Level", "Target Label"],
     )
     data_start_idx = 0
-    if not label_col and len(gathered_df) > 1:
-        header_row = gathered_df.iloc[1]
+    if not label_col and len(gathered_df) > 0:
+        header_row = gathered_df.iloc[0]
         label_col = _find_column_by_row_values(
             header_row,
             ["Target Level Label", "Target Level", "Target Label"],
         )
         if label_col:
-            data_start_idx = 2
+            data_start_idx = 1
     if not label_col:
         raise ValueError("The gatheredCN10 file is missing the Target Level Label column.")
     labels = (
