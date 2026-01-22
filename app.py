@@ -7,7 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
-from dash import Dash, html, dcc, Input, Output, State, callback, no_update
+from dash import Dash, html, dcc, Input, Output, State, callback, no_update, ALL
 from openpyxl import load_workbook
 from pptx import Presentation
 from pptx.util import Inches
@@ -101,6 +101,19 @@ def df_from_contents(contents, filename):
         return pd.read_excel(io.BytesIO(decoded), **read_options)
     elif filename.lower().endswith(".csv"):
         return pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+    else:
+        raise ValueError("Unsupported file format. Please upload CSV or Excel.")
+
+
+def raw_df_from_contents(contents, filename):
+    decoded = bytes_from_contents(contents)
+    if filename.lower().endswith((".xlsx", ".xls", ".xlsb")):
+        read_options = {}
+        if filename.lower().endswith(".xlsb"):
+            read_options["engine"] = "pyxlsb"
+        return pd.read_excel(io.BytesIO(decoded), header=None, **read_options)
+    elif filename.lower().endswith(".csv"):
+        return pd.read_csv(io.StringIO(decoded.decode("utf-8")), header=None)
     else:
         raise ValueError("Unsupported file format. Please upload CSV or Excel.")
 
@@ -501,6 +514,175 @@ def _normalize_text_value(value) -> str:
     if pd.isna(value):
         return ""
     return str(value).strip().lower()
+
+
+def _two_row_column_match(
+    group_value: str,
+    sub_value: str,
+    candidates: list[str],
+) -> bool:
+    group_key = _normalize_column_name(group_value)
+    sub_key = _normalize_column_name(sub_value)
+    candidate_keys = {_normalize_column_name(candidate) for candidate in candidates}
+    return group_key in candidate_keys or sub_key in candidate_keys
+
+
+def _parse_two_row_header_dataframe(
+    raw_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict]:
+    """Parse a gatheredCN10 file that uses two header rows.
+
+    Returns the data rows with stable internal column IDs plus metadata for UI mapping.
+
+    Example:
+        >>> raw = pd.DataFrame(
+        ...     [
+        ...         ["Promo", "Promo", "", ""],
+        ...         ["Feature", "Display", "Target Label", "Year"],
+        ...         [1, 2, "Own", 2023],
+        ...     ]
+        ... )
+        >>> data_df, meta = _parse_two_row_header_dataframe(raw)
+        >>> meta["group_order"]
+        ['Promo']
+    """
+    if raw_df is None or raw_df.empty or raw_df.shape[0] < 3:
+        raise ValueError("The gatheredCN10 file must include two header rows and data rows.")
+    header_row1 = raw_df.iloc[0].fillna("")
+    header_row2 = raw_df.iloc[1].fillna("")
+    columns_meta = []
+    group_map: dict[str, list[dict]] = {}
+    group_order: list[str] = []
+    for idx in range(raw_df.shape[1]):
+        group = str(header_row1.iloc[idx]).strip()
+        subheader = str(header_row2.iloc[idx]).strip()
+        col_id = f"col_{idx}"
+        columns_meta.append(
+            {
+                "id": col_id,
+                "group": group,
+                "subheader": subheader,
+                "position": idx,
+            }
+        )
+        if not group:
+            continue
+        group_key = _normalize_column_name(group)
+        if group_key in {"targetlabel", "year"}:
+            continue
+        if group not in group_map:
+            group_map[group] = []
+            group_order.append(group)
+        group_map[group].append(
+            {
+                "id": col_id,
+                "subheader": subheader,
+                "position": idx,
+            }
+        )
+
+    target_label_id = None
+    year_id = None
+    for column in columns_meta:
+        if target_label_id is None and _two_row_column_match(
+            column["group"],
+            column["subheader"],
+            ["Target Label"],
+        ):
+            target_label_id = column["id"]
+        if year_id is None and _two_row_column_match(
+            column["group"],
+            column["subheader"],
+            ["Year"],
+        ):
+            year_id = column["id"]
+
+    data_df = raw_df.iloc[2:].reset_index(drop=True).copy()
+    data_df.columns = [col["id"] for col in columns_meta]
+    metadata = {
+        "columns": columns_meta,
+        "groups": group_map,
+        "group_order": group_order,
+        "target_label_id": target_label_id,
+        "year_id": year_id,
+    }
+    return data_df, metadata
+
+
+def _unique_column_values(data_df: pd.DataFrame, column_id: str) -> list[str]:
+    if column_id not in data_df.columns:
+        return []
+    values = (
+        data_df[column_id]
+        .dropna()
+        .astype(str)
+        .map(str.strip)
+    )
+    unique_values = []
+    seen = set()
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        unique_values.append(value)
+    return unique_values
+
+
+def _compute_bucket_deltas(
+    data_df: pd.DataFrame,
+    metadata: dict,
+    selections: dict[str, list[str]],
+    target_label: str,
+    year1: str,
+    year2: str,
+) -> list[tuple[str, float]]:
+    """Compute Year2-Year1 deltas for each bucket group.
+
+    Example:
+        >>> raw = pd.DataFrame(
+        ...     [
+        ...         ["Promo", "Promo", "", ""],
+        ...         ["Feature", "Display", "Target Label", "Year"],
+        ...         [10, 5, "Own", "2023"],
+        ...         [20, 10, "Own", "2024"],
+        ...     ]
+        ... )
+        >>> data_df, meta = _parse_two_row_header_dataframe(raw)
+        >>> selections = {"Promo": ["col_0", "col_1"]}
+        >>> _compute_bucket_deltas(data_df, meta, selections, "Own", "2023", "2024")
+        [('Promo', 15.0)]
+    """
+    target_label_id = metadata.get("target_label_id")
+    year_id = metadata.get("year_id")
+    if not target_label_id:
+        raise ValueError("The gatheredCN10 file is missing the Target Label column.")
+    if not year_id:
+        raise ValueError("The gatheredCN10 file is missing the Year column.")
+
+    normalized_target = _normalize_text_value(target_label)
+    normalized_year1 = _normalize_text_value(year1)
+    normalized_year2 = _normalize_text_value(year2)
+
+    target_series = data_df[target_label_id].map(_normalize_text_value)
+    year_series = data_df[year_id].map(_normalize_text_value)
+
+    deltas: list[tuple[str, float]] = []
+    for group in metadata.get("group_order", []):
+        selected_cols = selections.get(group, [])
+        if not selected_cols:
+            deltas.append((group, 0.0))
+            continue
+        selected_cols = [col for col in selected_cols if col in data_df.columns]
+        if not selected_cols:
+            deltas.append((group, 0.0))
+            continue
+        values_df = data_df[selected_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+        year1_mask = (target_series == normalized_target) & (year_series == normalized_year1)
+        year2_mask = (target_series == normalized_target) & (year_series == normalized_year2)
+        year1_sum = values_df[year1_mask].sum().sum()
+        year2_sum = values_df[year2_mask].sum().sum()
+        deltas.append((group, float(year2_sum - year1_sum)))
+    return deltas
 
 
 def _resolve_base_value_columns(gathered_df: pd.DataFrame) -> tuple[dict, int]:
@@ -1167,6 +1349,40 @@ def _waterfall_base_indices(categories: list[str]) -> tuple[int, int] | None:
     return earliest_idx, latest_idx
 
 
+def _apply_bucket_categories(
+    categories: list[str],
+    bucket_labels: list[str],
+    base_indices: tuple[int, int],
+) -> tuple[list[str], tuple[int, int]]:
+    if not bucket_labels:
+        return categories, base_indices
+    start_idx, end_idx = base_indices
+    if start_idx > end_idx:
+        start_idx, end_idx = end_idx, start_idx
+    prefix = categories[: start_idx + 1]
+    suffix = categories[end_idx:]
+    new_categories = prefix + bucket_labels + suffix
+    new_end_idx = start_idx + len(bucket_labels) + 1
+    return new_categories, (start_idx, new_end_idx)
+
+
+def _apply_bucket_values(
+    values: list[float],
+    base_indices: tuple[int, int],
+    bucket_values: list[float],
+) -> list[float]:
+    if not bucket_values:
+        return values
+    start_idx, end_idx = base_indices
+    if start_idx > end_idx:
+        start_idx, end_idx = end_idx, start_idx
+    if end_idx >= len(values):
+        values = values + [0.0] * (end_idx - len(values) + 1)
+    prefix = values[: start_idx + 1]
+    suffix = values[end_idx:]
+    return prefix + bucket_values + suffix
+
+
 def _should_update_base_series(chart_series) -> bool:
     name = getattr(chart_series, "name", "")
     if not name:
@@ -1179,10 +1395,31 @@ def _build_waterfall_chart_data(
     scope_df: pd.DataFrame | None,
     gathered_df: pd.DataFrame | None = None,
     target_level_label: str | None = None,
-) -> tuple[ChartData, list[str], tuple[int, int] | None, tuple[float, float] | None, list[tuple[str, list[float]]]]:
+    bucket_labels: list[str] | None = None,
+    bucket_values: list[float] | None = None,
+) -> tuple[
+    ChartData,
+    list[str],
+    tuple[int, int] | None,
+    tuple[float, float] | None,
+    list[tuple[str, list[float]]],
+]:
     categories = _categories_from_chart(chart)
     base_indices = _waterfall_base_indices(categories)
     categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
+    original_base_indices = base_indices
+    bucket_labels = list(bucket_labels or [])
+    bucket_values = [float(value) for value in (bucket_values or [])]
+    if bucket_labels and bucket_values:
+        bucket_len = min(len(bucket_labels), len(bucket_values))
+        bucket_labels = bucket_labels[:bucket_len]
+        bucket_values = bucket_values[:bucket_len]
+    if bucket_labels and base_indices:
+        categories, base_indices = _apply_bucket_categories(
+            categories,
+            bucket_labels,
+            base_indices,
+        )
     base_values = None
     if (
         gathered_df is not None
@@ -1195,6 +1432,8 @@ def _build_waterfall_chart_data(
     series_values: list[tuple[str, list[float]]] = []
     for series in chart.series:
         values = list(series.values)
+        if bucket_values and original_base_indices:
+            values = _apply_bucket_values(values, original_base_indices, bucket_values)
         if base_values and base_indices:
             should_update = _should_update_base_series(series)
             if not should_update and len(chart.series) == 1:
@@ -1215,6 +1454,7 @@ def _add_waterfall_chart_from_template(
     scope_df: pd.DataFrame | None,
     gathered_df: pd.DataFrame | None,
     target_level_label: str | None,
+    bucket_data: dict | None,
     chart_name: str,
 ):
     template_shape = _waterfall_chart_shape_from_slide(template_slide, chart_name)
@@ -1231,6 +1471,8 @@ def _add_waterfall_chart_from_template(
         scope_df,
         gathered_df,
         target_level_label,
+        bucket_data.get("labels") if bucket_data else None,
+        bucket_data.get("values") if bucket_data else None,
     )
     chart_type = getattr(
         template_chart,
@@ -1282,6 +1524,7 @@ def _update_waterfall_chart(
     scope_df: pd.DataFrame | None,
     gathered_df: pd.DataFrame | None,
     target_level_label: str | None,
+    bucket_data: dict | None,
 ) -> None:
     chart = _waterfall_chart_from_slide(slide, "Waterfall Template")
     if chart is None:
@@ -1293,6 +1536,8 @@ def _update_waterfall_chart(
         scope_df,
         gathered_df,
         target_level_label,
+        bucket_data.get("labels") if bucket_data else None,
+        bucket_data.get("values") if bucket_data else None,
     )
     chart.replace_data(cd)
     updated_wb = _load_chart_workbook(chart)
@@ -1313,6 +1558,7 @@ def populate_category_waterfall(
     gathered_df: pd.DataFrame,
     scope_df: pd.DataFrame | None = None,
     target_labels: list[str] | None = None,
+    bucket_data: dict | None = None,
 ):
     template_slide = _find_slide_by_marker(prs, "<Waterfall Template>")
     if template_slide is None:
@@ -1321,7 +1567,7 @@ def populate_category_waterfall(
     if not labels:
         return
     first_slide = template_slide
-    _update_waterfall_chart(first_slide, scope_df, gathered_df, labels[0])
+    _update_waterfall_chart(first_slide, scope_df, gathered_df, labels[0], bucket_data)
     _set_waterfall_slide_header(first_slide, labels[0])
     for label in labels[1:]:
         new_slide = prs.slides.add_slide(template_slide.slide_layout)
@@ -1331,6 +1577,7 @@ def populate_category_waterfall(
             scope_df,
             gathered_df,
             label,
+            bucket_data,
             "Waterfall Template",
         )
         _set_waterfall_slide_header(new_slide, label)
@@ -1343,6 +1590,7 @@ def build_pptx_from_template(
     scope_df=None,
     product_description_df=None,
     waterfall_targets=None,
+    bucket_data=None,
 ):
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
@@ -1420,6 +1668,7 @@ def build_pptx_from_template(
                 df,
                 scope_df,
                 waterfall_targets,
+                bucket_data,
             )
         except Exception:
             logger.exception("Failed to populate category waterfall slides.")
@@ -1468,6 +1717,8 @@ app.layout = html.Div(
     children=[
         html.H2("PowerPoint Deck Automator (Dash + python-pptx)"),
         html.P("Upload your data, pick the project, and we will fill the matching PPTX template."),
+        dcc.Store(id="bucket-metadata"),
+        dcc.Store(id="bucket-deltas"),
         html.Div(
             [
                 html.Label("Which project are you working on?"),
@@ -1539,6 +1790,64 @@ app.layout = html.Div(
             ],
             style={"marginBottom": "18px"},
         ),
+        html.Div(
+            [
+                html.H3("Bucketed Waterfall Inputs"),
+                html.Div(
+                    [
+                        html.Label("Target Label"),
+                        dcc.Dropdown(
+                            id="bucket-target-label",
+                            options=[],
+                            placeholder="Select a Target Label",
+                            clearable=False,
+                        ),
+                    ],
+                    style={"marginBottom": "12px"},
+                ),
+                html.Div(
+                    [
+                        html.Label("Year 1"),
+                        dcc.Dropdown(
+                            id="bucket-year1",
+                            options=[],
+                            placeholder="Select Year 1",
+                            clearable=False,
+                        ),
+                    ],
+                    style={"marginBottom": "12px"},
+                ),
+                html.Div(
+                    [
+                        html.Label("Year 2"),
+                        dcc.Dropdown(
+                            id="bucket-year2",
+                            options=[],
+                            placeholder="Select Year 2",
+                            clearable=False,
+                        ),
+                    ],
+                    style={"marginBottom": "12px"},
+                ),
+                html.Div(id="bucket-group-controls"),
+                html.Button(
+                    "Apply Buckets to Waterfall",
+                    id="apply-buckets",
+                    n_clicks=0,
+                    style={"padding": "10px 16px", "borderRadius": "10px"},
+                ),
+                html.Div(
+                    id="bucket-status",
+                    style={"color": "#6B7280", "fontSize": "0.9rem", "marginTop": "8px"},
+                ),
+            ],
+            style={
+                "marginBottom": "18px",
+                "padding": "12px",
+                "border": "1px solid #E5E7EB",
+                "borderRadius": "12px",
+            },
+        ),
 
         html.Button("Generate Deck", id="go", n_clicks=0, style={"padding":"10px 16px","borderRadius":"10px"}),
         html.Div(id="status", style={"marginTop":"10px", "color":"#888"}),
@@ -1591,6 +1900,197 @@ def populate_waterfall_targets(contents, filename):
     options = [{"label": label, "value": label} for label in target_labels]
     return options, target_labels, f"Found {len(target_labels)} Target Level Label value(s)."
 
+
+@callback(
+    Output("bucket-metadata", "data"),
+    Output("bucket-target-label", "options"),
+    Output("bucket-target-label", "value"),
+    Output("bucket-year1", "options"),
+    Output("bucket-year1", "value"),
+    Output("bucket-year2", "options"),
+    Output("bucket-year2", "value"),
+    Output("bucket-group-controls", "children"),
+    Output("bucket-status", "children"),
+    Input("data-upload", "contents"),
+    State("data-upload", "filename"),
+)
+def populate_bucket_controls(contents, filename):
+    if not contents:
+        return (
+            {},
+            [],
+            None,
+            [],
+            None,
+            [],
+            None,
+            [],
+            "Upload a gatheredCN10 file to configure bucket inputs.",
+        )
+    try:
+        raw_df = raw_df_from_contents(contents, filename)
+        data_df, metadata = _parse_two_row_header_dataframe(raw_df)
+    except Exception as exc:
+        return (
+            {},
+            [],
+            None,
+            [],
+            None,
+            [],
+            None,
+            [],
+            f"Error parsing two-row headers: {exc}",
+        )
+
+    if not metadata.get("target_label_id"):
+        return (
+            metadata,
+            [],
+            None,
+            [],
+            None,
+            [],
+            None,
+            [],
+            "The gatheredCN10 file is missing the Target Label column.",
+        )
+    if not metadata.get("year_id"):
+        return (
+            metadata,
+            [],
+            None,
+            [],
+            None,
+            [],
+            None,
+            [],
+            "The gatheredCN10 file is missing the Year column.",
+        )
+
+    target_values = _unique_column_values(data_df, metadata["target_label_id"])
+    year_values = _unique_column_values(data_df, metadata["year_id"])
+    target_options = [{"label": value, "value": value} for value in target_values]
+    year_options = [{"label": value, "value": value} for value in year_values]
+    year1_default = year_values[0] if year_values else None
+    year2_default = year_values[1] if len(year_values) > 1 else year1_default
+
+    group_controls = []
+    for group in metadata.get("group_order", []):
+        columns = metadata.get("groups", {}).get(group, [])
+        if not columns:
+            continue
+        label_counts: dict[str, int] = {}
+        options = []
+        for column in columns:
+            subheader = column.get("subheader") or "Unnamed"
+            label_counts[subheader] = label_counts.get(subheader, 0) + 1
+            label = subheader
+            if label_counts[subheader] > 1:
+                label = f"{subheader} ({label_counts[subheader]})"
+            options.append({"label": label, "value": column["id"]})
+        group_controls.append(
+            html.Div(
+                [
+                    html.Label(group, style={"fontWeight": "600"}),
+                    dcc.Checklist(
+                        id={"type": "bucket-group", "group": group},
+                        options=options,
+                        value=[option["value"] for option in options],
+                        labelStyle={"display": "block", "marginBottom": "4px"},
+                        inputStyle={"marginRight": "6px"},
+                    ),
+                ],
+                style={
+                    "marginBottom": "12px",
+                    "padding": "8px",
+                    "border": "1px solid #E5E7EB",
+                    "borderRadius": "8px",
+                },
+            )
+        )
+
+    status = (
+        f"Loaded {len(metadata.get('group_order', []))} bucket group(s)."
+        if metadata.get("group_order")
+        else "No bucket groups were found in the first header row."
+    )
+    return (
+        metadata,
+        target_options,
+        target_values[0] if target_values else None,
+        year_options,
+        year1_default,
+        year_options,
+        year2_default,
+        group_controls,
+        status,
+    )
+
+
+@callback(
+    Output("bucket-deltas", "data"),
+    Output("bucket-status", "children"),
+    Input("apply-buckets", "n_clicks"),
+    State("data-upload", "contents"),
+    State("data-upload", "filename"),
+    State("bucket-target-label", "value"),
+    State("bucket-year1", "value"),
+    State("bucket-year2", "value"),
+    State("bucket-metadata", "data"),
+    State({"type": "bucket-group", "group": ALL}, "value"),
+    State({"type": "bucket-group", "group": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def apply_bucket_selection(
+    n_clicks,
+    contents,
+    filename,
+    target_label,
+    year1,
+    year2,
+    metadata,
+    selections,
+    selection_ids,
+):
+    if not contents:
+        return no_update, "Upload a gatheredCN10 file before applying buckets."
+    if not metadata:
+        return no_update, "Bucket metadata is unavailable. Re-upload the gatheredCN10 file."
+    if not target_label or not year1 or not year2:
+        return no_update, "Select Target Label, Year 1, and Year 2 values before applying."
+
+    try:
+        raw_df = raw_df_from_contents(contents, filename)
+        data_df, parsed_meta = _parse_two_row_header_dataframe(raw_df)
+    except Exception as exc:
+        return no_update, f"Error parsing gatheredCN10: {exc}"
+
+    group_selections: dict[str, list[str]] = {}
+    for selection, selection_id in zip(selections, selection_ids):
+        group = selection_id.get("group")
+        group_selections[group] = selection
+
+    try:
+        deltas = _compute_bucket_deltas(
+            data_df,
+            parsed_meta,
+            group_selections,
+            target_label,
+            year1,
+            year2,
+        )
+    except Exception as exc:
+        return no_update, f"Error computing bucket deltas: {exc}"
+
+    bucket_data = {
+        "labels": [label for label, _ in deltas],
+        "values": [value for _, value in deltas],
+        "target_label": target_label,
+        "year1": year1,
+        "year2": year2,
+    }
+    return bucket_data, f"Applied {len(deltas)} bucket delta(s) to the waterfall."
 @callback(
     Output("download","data"),
     Output("status","children"),
@@ -1601,6 +2101,7 @@ def populate_waterfall_targets(contents, filename):
     State("scope-upload", "filename"),
     State("project-select", "value"),
     State("waterfall-targets", "value"),
+    State("bucket-deltas", "data"),
     prevent_initial_call=True
 )
 def generate_deck(
@@ -1611,6 +2112,7 @@ def generate_deck(
     scope_name,
     project_name,
     waterfall_targets,
+    bucket_data,
 ):
     if not data_contents or not project_name:
         return no_update, "Please upload the data file and select a project."
@@ -1644,6 +2146,7 @@ def generate_deck(
             scope_df,
             product_description_df,
             waterfall_targets,
+            bucket_data,
         )
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
