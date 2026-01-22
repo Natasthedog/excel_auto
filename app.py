@@ -662,23 +662,37 @@ def _compute_bucket_deltas(
         selected_cols = [
             col for col in config.get("subheaders_included", []) if col in data_df.columns
         ]
-        if not selected_cols:
+        target_labels = config.get("target_labels") or ["Own", "Cross"]
+        ordered_targets = []
+        normalized_targets = []
+        for label in target_labels:
+            normalized = _normalize_text_value(label)
+            if normalized and normalized not in normalized_targets:
+                normalized_targets.append(normalized)
+                ordered_targets.append((label, normalized))
+        target_label_sequence = []
+        if "own" in normalized_targets:
+            target_label_sequence.append(("Own", "own"))
+        if "cross" in normalized_targets:
+            target_label_sequence.append(("Cross", "cross"))
+        for label, normalized in ordered_targets:
+            if normalized not in {"own", "cross"}:
+                target_label_sequence.append((label, normalized))
+        if not target_label_sequence:
             deltas.append((group, 0.0))
             continue
-        target_labels = config.get("target_labels") or ["Own", "Cross"]
-        normalized_targets = {
-            _normalize_text_value(label) for label in target_labels if label
-        }
-        if not normalized_targets:
-            deltas.append((group, 0.0))
+        if not selected_cols:
+            for label, _ in target_label_sequence:
+                deltas.append((f"{label} {group}", 0.0))
             continue
         values_df = data_df[selected_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         year1_mask = year_series == normalized_year1
         year2_mask = year_series == normalized_year2
-        target_mask = target_series.isin(normalized_targets)
-        year1_sum = values_df[year1_mask & target_mask].sum().sum()
-        year2_sum = values_df[year2_mask & target_mask].sum().sum()
-        deltas.append((group, float(year2_sum - year1_sum)))
+        for label, normalized in target_label_sequence:
+            target_mask = target_series == normalized
+            year1_sum = values_df[year1_mask & target_mask].sum().sum()
+            year2_sum = values_df[year2_mask & target_mask].sum().sum()
+            deltas.append((f"{label} {group}", float(year2_sum - year1_sum)))
     return deltas
 
 
