@@ -474,6 +474,8 @@ def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
 
     for key in series_candidates:
         waterfall_df[key] = pd.to_numeric(waterfall_df[key], errors="coerce").fillna(0)
+    if "Negatives" in waterfall_df.columns:
+        waterfall_df["Negatives"] = waterfall_df["Negatives"].abs()
 
     return waterfall_df
 
