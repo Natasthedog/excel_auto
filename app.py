@@ -685,6 +685,41 @@ def _compute_bucket_deltas(
     return deltas
 
 
+def _compute_bucket_deltas_by_column(
+    data_df: pd.DataFrame,
+    metadata: dict,
+    selected_columns: list[str],
+    target_label: str,
+    year1: str,
+    year2: str,
+) -> list[tuple[str, float]]:
+    target_label_id = metadata.get("target_label_id")
+    year_id = metadata.get("year_id")
+    if not target_label_id:
+        raise ValueError("The gatheredCN10 file is missing the Target Label column.")
+    if not year_id:
+        raise ValueError("The gatheredCN10 file is missing the Year column.")
+
+    normalized_target = _normalize_text_value(target_label)
+    normalized_year1 = _normalize_text_value(year1)
+    normalized_year2 = _normalize_text_value(year2)
+
+    target_series = data_df[target_label_id].map(_normalize_text_value)
+    year_series = data_df[year_id].map(_normalize_text_value)
+    year1_mask = (target_series == normalized_target) & (year_series == normalized_year1)
+    year2_mask = (target_series == normalized_target) & (year_series == normalized_year2)
+
+    deltas: list[tuple[str, float]] = []
+    for column_id in selected_columns:
+        if column_id not in data_df.columns:
+            continue
+        values = pd.to_numeric(data_df[column_id], errors="coerce").fillna(0)
+        year1_sum = values[year1_mask].sum()
+        year2_sum = values[year2_mask].sum()
+        deltas.append((column_id, float(year2_sum - year1_sum)))
+    return deltas
+
+
 def _resolve_base_value_columns(gathered_df: pd.DataFrame) -> tuple[dict, int]:
     column_candidates = {
         "target_level": ["Target Level Label", "Target Level", "Target Label"],
@@ -2007,41 +2042,57 @@ def populate_bucket_controls(contents, filename):
     year1_default = year_values[0] if year_values else None
     year2_default = year_values[1] if len(year_values) > 1 else year1_default
 
+    column_labels: dict[str, str] = {}
     group_controls = []
     for group in metadata.get("group_order", []):
         columns = metadata.get("groups", {}).get(group, [])
         if not columns:
             continue
         label_counts: dict[str, int] = {}
-        options = []
+        column_rows = []
         for column in columns:
             subheader = column.get("subheader") or "Unnamed"
             label_counts[subheader] = label_counts.get(subheader, 0) + 1
             label = subheader
             if label_counts[subheader] > 1:
                 label = f"{subheader} ({label_counts[subheader]})"
-            options.append({"label": label, "value": column["id"]})
+            column_id = column["id"]
+            column_labels[column_id] = label
+            column_rows.append(
+                html.Div(
+                    [
+                        dcc.Checklist(
+                            id={"type": "bucket-column", "column": column_id},
+                            options=[{"label": label, "value": column_id}],
+                            value=[column_id],
+                            labelStyle={"display": "block", "marginBottom": "4px"},
+                            inputStyle={"marginRight": "6px"},
+                        ),
+                        dcc.Dropdown(
+                            id={"type": "bucket-column-type", "column": column_id},
+                            options=[
+                                {"label": "Own", "value": "Own"},
+                                {"label": "Cross", "value": "Cross"},
+                            ],
+                            value="Own",
+                            clearable=False,
+                            style={"width": "140px"},
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "alignItems": "center",
+                        "justifyContent": "space-between",
+                        "gap": "12px",
+                        "marginBottom": "6px",
+                    },
+                )
+            )
         group_controls.append(
             html.Div(
                 [
                     html.Label(group, style={"fontWeight": "600"}),
-                    dcc.Checklist(
-                        id={"type": "bucket-group", "group": group},
-                        options=options,
-                        value=[option["value"] for option in options],
-                        labelStyle={"display": "block", "marginBottom": "4px"},
-                        inputStyle={"marginRight": "6px"},
-                    ),
-                    html.Label("Bucket Type", style={"marginTop": "8px"}),
-                    dcc.Dropdown(
-                        id={"type": "bucket-group-type", "group": group},
-                        options=[
-                            {"label": "Own", "value": "Own"},
-                            {"label": "Cross", "value": "Cross"},
-                        ],
-                        value="Own",
-                        clearable=False,
-                    ),
+                    *column_rows,
                 ],
                 style={
                     "marginBottom": "12px",
@@ -2058,7 +2109,7 @@ def populate_bucket_controls(contents, filename):
         else "No bucket groups were found in the first header row."
     )
     return (
-        metadata,
+        {**metadata, "column_labels": column_labels},
         target_options,
         target_values[0] if target_values else None,
         year_options,
@@ -2080,10 +2131,10 @@ def populate_bucket_controls(contents, filename):
     State("bucket-year1", "value"),
     State("bucket-year2", "value"),
     State("bucket-metadata", "data"),
-    State({"type": "bucket-group", "group": ALL}, "value"),
-    State({"type": "bucket-group", "group": ALL}, "id"),
-    State({"type": "bucket-group-type", "group": ALL}, "value"),
-    State({"type": "bucket-group-type", "group": ALL}, "id"),
+    State({"type": "bucket-column", "column": ALL}, "value"),
+    State({"type": "bucket-column", "column": ALL}, "id"),
+    State({"type": "bucket-column-type", "column": ALL}, "value"),
+    State({"type": "bucket-column-type", "column": ALL}, "id"),
     prevent_initial_call=True,
 )
 def apply_bucket_selection(
@@ -2112,21 +2163,23 @@ def apply_bucket_selection(
     except Exception as exc:
         return no_update, f"Error parsing gatheredCN10: {exc}"
 
-    group_selections: dict[str, list[str]] = {}
-    for selection, selection_id in zip(selections, selection_ids):
-        group = selection_id.get("group")
-        group_selections[group] = selection
     bucket_type_map: dict[str, str] = {}
     for bucket_type, type_id in zip(bucket_types, bucket_type_ids):
-        group = type_id.get("group")
-        if group:
-            bucket_type_map[group] = bucket_type or "Own"
+        column_id = type_id.get("column")
+        if column_id:
+            bucket_type_map[column_id] = bucket_type or "Own"
+
+    selected_columns = []
+    for selection, selection_id in zip(selections, selection_ids):
+        column_id = selection_id.get("column")
+        if column_id and selection:
+            selected_columns.append(column_id)
 
     try:
-        deltas = _compute_bucket_deltas(
+        deltas = _compute_bucket_deltas_by_column(
             data_df,
             parsed_meta,
-            group_selections,
+            selected_columns,
             target_label,
             year1,
             year2,
@@ -2136,9 +2189,11 @@ def apply_bucket_selection(
 
     labels = []
     values = []
-    for label, value in deltas:
-        bucket_type = bucket_type_map.get(label, "Own")
-        bucket_label = f"{bucket_type} {label}".strip()
+    column_labels = metadata.get("column_labels", {}) if metadata else {}
+    for column_id, value in deltas:
+        bucket_type = bucket_type_map.get(column_id, "Own")
+        bucket_name = column_labels.get(column_id, column_id)
+        bucket_label = f"{bucket_type} {bucket_name}".strip()
         labels.append(bucket_label)
         values.append(value)
 
