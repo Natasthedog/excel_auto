@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 from dash import Dash, html, dcc, Input, Output, State, callback, no_update, ALL
 from openpyxl import load_workbook
+import numbers
 from pptx import Presentation
 from pptx.util import Inches
 from pptx.enum.text import PP_ALIGN
@@ -860,6 +861,58 @@ def _update_lab_base_label(
         return
 
 
+def _is_blank_cell(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
+def _normalize_header_value(value: str) -> str:
+    return str(value).strip().lower()
+
+
+def _ensure_negatives_column_positive(ws) -> None:
+    header_row = None
+    header_col = None
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
+        for cell in row:
+            value = cell.value
+            if value is None:
+                continue
+            if _normalize_header_value(value) == "negatives":
+                header_row = cell.row
+                header_col = cell.column
+                break
+        if header_row is not None:
+            break
+    if header_row is None or header_col is None:
+        return
+
+    label_col = header_col - 1 if header_col > 1 else header_col
+    empty_streak = 0
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        label_value = ws.cell(row=row_idx, column=label_col).value
+        negatives_cell = ws.cell(row=row_idx, column=header_col)
+        if _is_blank_cell(label_value):
+            if _is_blank_cell(negatives_cell.value):
+                empty_streak += 1
+                if empty_streak >= 2:
+                    break
+                continue
+            break
+        empty_streak = 0
+        value = negatives_cell.value
+        if isinstance(value, numbers.Number) and not isinstance(value, bool):
+            negatives_cell.value = abs(value)
+            continue
+        if isinstance(value, str) and value.lstrip().startswith("="):
+            formula = value.lstrip()[1:].strip()
+            if not (formula.lower().startswith("abs(") and formula.endswith(")")):
+                negatives_cell.value = f"=ABS({formula})"
+
+
 def _format_yoy_change_text(value: float) -> str:
     if value is None or pd.isna(value):
         return "0%"
@@ -1659,6 +1712,7 @@ def _add_waterfall_chart_from_template(
         total_rows,
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
+    _ensure_negatives_column_positive(updated_wb.active)
     _save_chart_workbook(chart_shape.chart, updated_wb)
     _update_waterfall_yoy_arrows(slide, base_values)
     return chart_shape
@@ -1711,6 +1765,7 @@ def _update_waterfall_chart(
         total_rows,
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
+    _ensure_negatives_column_positive(updated_wb.active)
     _save_chart_workbook(chart, updated_wb)
     _update_waterfall_yoy_arrows(slide, base_values)
 
