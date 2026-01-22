@@ -1207,7 +1207,6 @@ def _add_waterfall_chart_from_template(
         cd,
     )
     chart_shape.name = getattr(template_shape, "name", chart_name)
-    _set_waterfall_chart_title(chart_shape.chart, target_level_label)
     updated_wb = _load_chart_workbook(chart_shape.chart)
     total_rows = len(categories)
     _update_lab_base_label(
@@ -1222,7 +1221,7 @@ def _add_waterfall_chart_from_template(
 
 
 def _set_waterfall_slide_header(slide, label: str) -> None:
-    title_text = f"{label} Waterfall"
+    title_text = label
     replaced = replace_text_in_slide_preserve_formatting(
         slide, "<Waterfall Template>", title_text
     )
@@ -1256,7 +1255,6 @@ def _update_waterfall_chart(
         target_level_label,
     )
     chart.replace_data(cd)
-    _set_waterfall_chart_title(chart, target_level_label)
     updated_wb = _load_chart_workbook(chart)
     total_rows = len(categories)
     _update_lab_base_label(
@@ -1283,6 +1281,7 @@ def populate_category_waterfall(
         return
     first_slide = template_slide
     _update_waterfall_chart(first_slide, scope_df, gathered_df, labels[0])
+    _set_waterfall_slide_header(first_slide, labels[0])
     for label in labels[1:]:
         new_slide = prs.slides.add_slide(template_slide.slide_layout)
         _add_waterfall_chart_from_template(
@@ -1293,6 +1292,7 @@ def populate_category_waterfall(
             label,
             "Waterfall Template",
         )
+        _set_waterfall_slide_header(new_slide, label)
 
 def build_pptx_from_template(
     template_bytes,
