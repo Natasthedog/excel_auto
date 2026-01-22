@@ -496,6 +496,55 @@ def _target_level_labels_from_gathered_df(gathered_df: pd.DataFrame) -> list[str
         unique_labels.append(label)
     return unique_labels
 
+def _normalize_text_value(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip().lower()
+
+
+def _resolve_base_value_columns(gathered_df: pd.DataFrame) -> tuple[dict, int]:
+    column_candidates = {
+        "target_level": ["Target Level Label", "Target Level", "Target Label"],
+        "target_label": ["Target Label", "Target", "Target Type"],
+        "year": ["Year", "Model Year"],
+        "actuals": ["Actuals", "Actual"],
+    }
+    columns = {}
+    data_start_idx = 0
+    header_row = gathered_df.iloc[0] if len(gathered_df) else None
+    for key, candidates in column_candidates.items():
+        column = _find_column_by_candidates(gathered_df, candidates)
+        if not column and header_row is not None:
+            column = _find_column_by_row_values(header_row, candidates)
+            if column:
+                data_start_idx = 1
+        if not column:
+            raise ValueError(
+                "The gatheredCN10 file is missing the "
+                f"{' / '.join(candidates)} column needed for the waterfall base."
+            )
+        columns[key] = column
+    return columns, data_start_idx
+
+
+def _waterfall_base_values(
+    gathered_df: pd.DataFrame,
+    target_level_label: str,
+) -> tuple[float, float]:
+    if gathered_df is None or gathered_df.empty:
+        raise ValueError("The gatheredCN10 file is empty.")
+    columns, data_start_idx = _resolve_base_value_columns(gathered_df)
+    data_df = gathered_df.iloc[data_start_idx:]
+    target_level = _normalize_text_value(target_level_label)
+    target_level_series = data_df[columns["target_level"]].map(_normalize_text_value)
+    target_label_series = data_df[columns["target_label"]].map(_normalize_text_value)
+    year_series = data_df[columns["year"]].map(_normalize_text_value)
+    actuals = pd.to_numeric(data_df[columns["actuals"]], errors="coerce").fillna(0)
+    base_filter = (target_level_series == target_level) & (target_label_series == "own")
+    year1_total = actuals[base_filter & (year_series == "year1")].sum()
+    year2_total = actuals[base_filter & (year_series == "year2")].sum()
+    return year1_total, year2_total
+
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
     If a chart with name=chart_name exists on the slide, update its data.
@@ -961,13 +1010,66 @@ def _categories_from_chart(chart) -> list[str]:
     return categories
 
 
-def _build_waterfall_chart_data(chart, scope_df: pd.DataFrame | None) -> ChartData:
+def _waterfall_base_indices(categories: list[str]) -> tuple[int, int] | None:
+    earliest_idx = None
+    latest_idx = None
+    for idx, value in enumerate(categories):
+        text = "" if value is None else str(value)
+        if "<earliest date>" in text:
+            earliest_idx = idx
+        if "<latest date>" in text:
+            latest_idx = idx
+    if earliest_idx is None or latest_idx is None:
+        matches = [
+            idx
+            for idx, value in enumerate(categories)
+            if "52 w/e" in ("" if value is None else str(value)).lower()
+        ]
+        if len(matches) >= 2:
+            earliest_idx = matches[0] if earliest_idx is None else earliest_idx
+            latest_idx = matches[-1] if latest_idx is None else latest_idx
+    if earliest_idx is None or latest_idx is None:
+        return None
+    return earliest_idx, latest_idx
+
+
+def _should_update_base_series(chart_series) -> bool:
+    name = getattr(chart_series, "name", "")
+    if not name:
+        return False
+    return "base" in str(name).lower()
+
+
+def _build_waterfall_chart_data(
+    chart,
+    scope_df: pd.DataFrame | None,
+    gathered_df: pd.DataFrame | None = None,
+    target_level_label: str | None = None,
+) -> ChartData:
     categories = _categories_from_chart(chart)
+    base_indices = _waterfall_base_indices(categories)
     categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
+    base_values = None
+    if (
+        gathered_df is not None
+        and target_level_label
+        and base_indices is not None
+    ):
+        base_values = _waterfall_base_values(gathered_df, target_level_label)
     cd = ChartData()
     cd.categories = categories
     for series in chart.series:
-        cd.add_series(series.name, list(series.values))
+        values = list(series.values)
+        if base_values and base_indices:
+            should_update = _should_update_base_series(series)
+            if not should_update and len(chart.series) == 1:
+                should_update = True
+            if should_update:
+                if base_indices[0] < len(values):
+                    values[base_indices[0]] = base_values[0]
+                if base_indices[1] < len(values):
+                    values[base_indices[1]] = base_values[1]
+        cd.add_series(series.name, values)
     return cd
 
 
@@ -975,13 +1077,20 @@ def _add_waterfall_chart_from_template(
     slide,
     template_slide,
     scope_df: pd.DataFrame | None,
+    gathered_df: pd.DataFrame | None,
+    target_level_label: str | None,
     chart_name: str,
 ):
     template_shape = _waterfall_chart_shape_from_slide(template_slide, chart_name)
     if template_shape is None:
         raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
     template_chart = template_shape.chart
-    cd = _build_waterfall_chart_data(template_chart, scope_df)
+    cd = _build_waterfall_chart_data(
+        template_chart,
+        scope_df,
+        gathered_df,
+        target_level_label,
+    )
     chart_type = getattr(
         template_chart,
         "chart_type",
@@ -1016,11 +1125,21 @@ def _set_waterfall_slide_header(slide, label: str) -> None:
             return
 
 
-def _update_waterfall_chart(slide, scope_df: pd.DataFrame | None) -> None:
+def _update_waterfall_chart(
+    slide,
+    scope_df: pd.DataFrame | None,
+    gathered_df: pd.DataFrame | None,
+    target_level_label: str | None,
+) -> None:
     chart = _waterfall_chart_from_slide(slide, "Waterfall Template")
     if chart is None:
         raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
-    cd = _build_waterfall_chart_data(chart, scope_df)
+    cd = _build_waterfall_chart_data(
+        chart,
+        scope_df,
+        gathered_df,
+        target_level_label,
+    )
     chart.replace_data(cd)
 
 
@@ -1037,15 +1156,15 @@ def populate_category_waterfall(
     if not labels:
         return
     first_slide = template_slide
-    _set_waterfall_slide_header(first_slide, labels[0])
-    _update_waterfall_chart(first_slide, scope_df)
+    _update_waterfall_chart(first_slide, scope_df, gathered_df, labels[0])
     for label in labels[1:]:
         new_slide = prs.slides.add_slide(template_slide.slide_layout)
-        _set_waterfall_slide_header(new_slide, label)
         _add_waterfall_chart_from_template(
             new_slide,
             template_slide,
             scope_df,
+            gathered_df,
+            label,
             "Waterfall Template",
         )
 
