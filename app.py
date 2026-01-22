@@ -1383,11 +1383,28 @@ def _apply_bucket_values(
     return prefix + bucket_values + suffix
 
 
+def _apply_bucket_placeholders(
+    values: list[float],
+    base_indices: tuple[int, int],
+    bucket_count: int,
+    fill_value: float = 0.0,
+) -> list[float]:
+    if bucket_count <= 0:
+        return values
+    fill_values = [fill_value] * bucket_count
+    return _apply_bucket_values(values, base_indices, fill_values)
+
+
 def _should_update_base_series(chart_series) -> bool:
     name = getattr(chart_series, "name", "")
     if not name:
         return False
     return "base" in str(name).lower()
+
+
+def _is_blanks_series(chart_series) -> bool:
+    name = getattr(chart_series, "name", "")
+    return "blank" in str(name).lower()
 
 
 def _build_waterfall_chart_data(
@@ -1420,6 +1437,7 @@ def _build_waterfall_chart_data(
             bucket_labels,
             base_indices,
         )
+    bucket_count = len(bucket_labels)
     base_values = None
     if (
         gathered_df is not None
@@ -1432,8 +1450,22 @@ def _build_waterfall_chart_data(
     series_values: list[tuple[str, list[float]]] = []
     for series in chart.series:
         values = list(series.values)
-        if bucket_values and original_base_indices:
-            values = _apply_bucket_values(values, original_base_indices, bucket_values)
+        if original_base_indices and bucket_labels:
+            if _is_blanks_series(series):
+                if bucket_values:
+                    values = _apply_bucket_values(values, original_base_indices, bucket_values)
+                else:
+                    values = _apply_bucket_placeholders(
+                        values,
+                        original_base_indices,
+                        bucket_count,
+                    )
+            else:
+                values = _apply_bucket_placeholders(
+                    values,
+                    original_base_indices,
+                    bucket_count,
+                )
         if base_values and base_indices:
             should_update = _should_update_base_series(series)
             if not should_update and len(chart.series) == 1:
@@ -2000,6 +2032,16 @@ def populate_bucket_controls(contents, filename):
                         labelStyle={"display": "block", "marginBottom": "4px"},
                         inputStyle={"marginRight": "6px"},
                     ),
+                    html.Label("Bucket Type", style={"marginTop": "8px"}),
+                    dcc.Dropdown(
+                        id={"type": "bucket-group-type", "group": group},
+                        options=[
+                            {"label": "Own", "value": "Own"},
+                            {"label": "Cross", "value": "Cross"},
+                        ],
+                        value="Own",
+                        clearable=False,
+                    ),
                 ],
                 style={
                     "marginBottom": "12px",
@@ -2040,6 +2082,8 @@ def populate_bucket_controls(contents, filename):
     State("bucket-metadata", "data"),
     State({"type": "bucket-group", "group": ALL}, "value"),
     State({"type": "bucket-group", "group": ALL}, "id"),
+    State({"type": "bucket-group-type", "group": ALL}, "value"),
+    State({"type": "bucket-group-type", "group": ALL}, "id"),
     prevent_initial_call=True,
 )
 def apply_bucket_selection(
@@ -2052,6 +2096,8 @@ def apply_bucket_selection(
     metadata,
     selections,
     selection_ids,
+    bucket_types,
+    bucket_type_ids,
 ):
     if not contents:
         return no_update, "Upload a gatheredCN10 file before applying buckets."
@@ -2070,6 +2116,11 @@ def apply_bucket_selection(
     for selection, selection_id in zip(selections, selection_ids):
         group = selection_id.get("group")
         group_selections[group] = selection
+    bucket_type_map: dict[str, str] = {}
+    for bucket_type, type_id in zip(bucket_types, bucket_type_ids):
+        group = type_id.get("group")
+        if group:
+            bucket_type_map[group] = bucket_type or "Own"
 
     try:
         deltas = _compute_bucket_deltas(
@@ -2083,14 +2134,24 @@ def apply_bucket_selection(
     except Exception as exc:
         return no_update, f"Error computing bucket deltas: {exc}"
 
+    labels = []
+    values = []
+    for label, value in deltas:
+        bucket_type = bucket_type_map.get(label, "Own")
+        bucket_label = f"{bucket_type} {label}".strip()
+        labels.append(bucket_label)
+        values.append(value)
+
     bucket_data = {
-        "labels": [label for label, _ in deltas],
-        "values": [value for _, value in deltas],
+        "labels": labels,
+        "values": values,
         "target_label": target_label,
         "year1": year1,
         "year2": year2,
     }
     return bucket_data, f"Applied {len(deltas)} bucket delta(s) to the waterfall."
+
+
 @callback(
     Output("download","data"),
     Output("status","children"),
