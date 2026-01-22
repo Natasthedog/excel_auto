@@ -630,6 +630,45 @@ def _update_lab_base_label(
         return
 
 
+def _format_yoy_change_text(value: float) -> str:
+    if value is None or pd.isna(value):
+        return "0%"
+    return f"{abs(value):.0%}"
+
+
+def _remove_shapes_with_text(slide, targets: list[str]) -> None:
+    if not targets:
+        return
+    for shape in list(slide.shapes):
+        if not shape.has_text_frame:
+            continue
+        text_value = shape.text_frame.text
+        if any(target in text_value for target in targets):
+            element = shape._element
+            element.getparent().remove(element)
+
+
+def _update_waterfall_yoy_arrows(
+    slide,
+    base_values: tuple[float, float] | None,
+) -> None:
+    if base_values is None:
+        return
+    year1_total, year2_total = base_values
+    if year1_total is None or year2_total is None:
+        return
+    if year1_total == 0:
+        pct_change = 0.0
+    else:
+        pct_change = (year2_total - year1_total) / year1_total
+    direction = "increase" if year2_total >= year1_total else "decrease"
+    remove_placeholder = "<% decrease>" if direction == "increase" else "<% increase>"
+    keep_placeholder = "<% increase>" if direction == "increase" else "<% decrease>"
+    _remove_shapes_with_text(slide, [remove_placeholder])
+    replacement_text = f"{_format_yoy_change_text(pct_change)} {direction}"
+    replace_text_in_slide_preserve_formatting(slide, keep_placeholder, replacement_text)
+
+
 def _set_waterfall_chart_title(chart, label: str | None) -> None:
     if not label:
         return
@@ -1217,6 +1256,7 @@ def _add_waterfall_chart_from_template(
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
     _save_chart_workbook(chart_shape.chart, updated_wb)
+    _update_waterfall_yoy_arrows(slide, base_values)
     return chart_shape
 
 
@@ -1265,6 +1305,7 @@ def _update_waterfall_chart(
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
     _save_chart_workbook(chart, updated_wb)
+    _update_waterfall_yoy_arrows(slide, base_values)
 
 
 def populate_category_waterfall(
