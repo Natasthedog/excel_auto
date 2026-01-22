@@ -1442,6 +1442,38 @@ def _is_blanks_series(chart_series) -> bool:
     return "blank" in str(name).lower()
 
 
+def _is_positive_series(chart_series) -> bool:
+    name = getattr(chart_series, "name", "")
+    return "positive" in str(name).lower()
+
+
+def _is_negative_series(chart_series) -> bool:
+    name = getattr(chart_series, "name", "")
+    return "negative" in str(name).lower()
+
+
+def _bucket_value_split(bucket_values: list[float]) -> tuple[list[float], list[float]]:
+    positives: list[float] = []
+    negatives: list[float] = []
+    for value in bucket_values:
+        if value >= 0:
+            positives.append(value)
+            negatives.append(0.0)
+        else:
+            positives.append(0.0)
+            negatives.append(value)
+    return positives, negatives
+
+
+def _bucket_blank_values(bucket_values: list[float], base_value: float) -> list[float]:
+    blanks: list[float] = []
+    running_total = base_value
+    for value in bucket_values:
+        blanks.append(running_total)
+        running_total += value
+    return blanks
+
+
 def _build_waterfall_chart_data(
     chart,
     scope_df: pd.DataFrame | None,
@@ -1482,13 +1514,63 @@ def _build_waterfall_chart_data(
         base_values = _waterfall_base_values(gathered_df, target_level_label)
     cd = ChartData()
     cd.categories = categories
+    base_start_value = None
+    if base_values and base_values[0] is not None:
+        base_start_value = float(base_values[0])
+    elif base_indices is not None:
+        for series in chart.series:
+            if _should_update_base_series(series):
+                series_values = list(series.values)
+                if base_indices[0] < len(series_values):
+                    base_start_value = float(series_values[base_indices[0]])
+                break
+    if base_start_value is None:
+        base_start_value = 0.0
+
+    positive_bucket_values = []
+    negative_bucket_values = []
+    blank_bucket_values = []
+    if bucket_labels and bucket_values:
+        positive_bucket_values, negative_bucket_values = _bucket_value_split(bucket_values)
+        blank_bucket_values = _bucket_blank_values(bucket_values, base_start_value)
+
     series_values: list[tuple[str, list[float]]] = []
     for series in chart.series:
         values = list(series.values)
         if original_base_indices and bucket_labels:
-            if _is_blanks_series(series):
-                if bucket_values:
-                    values = _apply_bucket_values(values, original_base_indices, bucket_values)
+            if _is_positive_series(series):
+                if positive_bucket_values:
+                    values = _apply_bucket_values(
+                        values,
+                        original_base_indices,
+                        positive_bucket_values,
+                    )
+                else:
+                    values = _apply_bucket_placeholders(
+                        values,
+                        original_base_indices,
+                        bucket_count,
+                    )
+            elif _is_negative_series(series):
+                if negative_bucket_values:
+                    values = _apply_bucket_values(
+                        values,
+                        original_base_indices,
+                        negative_bucket_values,
+                    )
+                else:
+                    values = _apply_bucket_placeholders(
+                        values,
+                        original_base_indices,
+                        bucket_count,
+                    )
+            elif _is_blanks_series(series):
+                if blank_bucket_values:
+                    values = _apply_bucket_values(
+                        values,
+                        original_base_indices,
+                        blank_bucket_values,
+                    )
                 else:
                     values = _apply_bucket_placeholders(
                         values,
@@ -1862,18 +1944,6 @@ app.layout = html.Div(
                 html.H3("Bucketed Waterfall Inputs"),
                 html.Div(
                     [
-                        html.Label("Target Label"),
-                        dcc.Dropdown(
-                            id="bucket-target-label",
-                            options=[],
-                            placeholder="Select a Target Label",
-                            clearable=False,
-                        ),
-                    ],
-                    style={"marginBottom": "12px"},
-                ),
-                html.Div(
-                    [
                         html.Label("Year 1"),
                         dcc.Dropdown(
                             id="bucket-year1",
@@ -1970,8 +2040,6 @@ def populate_waterfall_targets(contents, filename):
 
 @callback(
     Output("bucket-metadata", "data"),
-    Output("bucket-target-label", "options"),
-    Output("bucket-target-label", "value"),
     Output("bucket-year1", "options"),
     Output("bucket-year1", "value"),
     Output("bucket-year2", "options"),
@@ -1990,8 +2058,6 @@ def populate_bucket_controls(contents, filename):
             [],
             None,
             [],
-            None,
-            [],
             "Upload a gatheredCN10 file to configure bucket inputs.",
         )
     try:
@@ -2000,8 +2066,6 @@ def populate_bucket_controls(contents, filename):
     except Exception as exc:
         return (
             {},
-            [],
-            None,
             [],
             None,
             [],
@@ -2018,8 +2082,6 @@ def populate_bucket_controls(contents, filename):
             [],
             None,
             [],
-            None,
-            [],
             "The gatheredCN10 file is missing the Target Label column.",
         )
     if not metadata.get("year_id"):
@@ -2030,19 +2092,16 @@ def populate_bucket_controls(contents, filename):
             [],
             None,
             [],
-            None,
-            [],
             "The gatheredCN10 file is missing the Year column.",
         )
 
-    target_values = _unique_column_values(data_df, metadata["target_label_id"])
     year_values = _unique_column_values(data_df, metadata["year_id"])
-    target_options = [{"label": value, "value": value} for value in target_values]
     year_options = [{"label": value, "value": value} for value in year_values]
     year1_default = year_values[0] if year_values else None
     year2_default = year_values[1] if len(year_values) > 1 else year1_default
 
     column_labels: dict[str, str] = {}
+    column_groups: dict[str, str] = {}
     group_controls = []
     for group in metadata.get("group_order", []):
         columns = metadata.get("groups", {}).get(group, [])
@@ -2058,6 +2117,7 @@ def populate_bucket_controls(contents, filename):
                 label = f"{subheader} ({label_counts[subheader]})"
             column_id = column["id"]
             column_labels[column_id] = label
+            column_groups[column_id] = group
             column_rows.append(
                 html.Div(
                     [
@@ -2068,15 +2128,16 @@ def populate_bucket_controls(contents, filename):
                             labelStyle={"display": "block", "marginBottom": "4px"},
                             inputStyle={"marginRight": "6px"},
                         ),
-                        dcc.Dropdown(
+                        dcc.Checklist(
                             id={"type": "bucket-column-type", "column": column_id},
                             options=[
                                 {"label": "Own", "value": "Own"},
                                 {"label": "Cross", "value": "Cross"},
                             ],
-                            value="Own",
-                            clearable=False,
-                            style={"width": "140px"},
+                            value=["Own"],
+                            labelStyle={"display": "block", "marginBottom": "2px"},
+                            inputStyle={"marginRight": "6px"},
+                            style={"minWidth": "120px"},
                         ),
                     ],
                     style={
@@ -2109,9 +2170,7 @@ def populate_bucket_controls(contents, filename):
         else "No bucket groups were found in the first header row."
     )
     return (
-        {**metadata, "column_labels": column_labels},
-        target_options,
-        target_values[0] if target_values else None,
+        {**metadata, "column_labels": column_labels, "column_groups": column_groups},
         year_options,
         year1_default,
         year_options,
@@ -2127,7 +2186,6 @@ def populate_bucket_controls(contents, filename):
     Input("apply-buckets", "n_clicks"),
     State("data-upload", "contents"),
     State("data-upload", "filename"),
-    State("bucket-target-label", "value"),
     State("bucket-year1", "value"),
     State("bucket-year2", "value"),
     State("bucket-metadata", "data"),
@@ -2141,7 +2199,6 @@ def apply_bucket_selection(
     n_clicks,
     contents,
     filename,
-    target_label,
     year1,
     year2,
     metadata,
@@ -2154,8 +2211,8 @@ def apply_bucket_selection(
         return no_update, "Upload a gatheredCN10 file before applying buckets."
     if not metadata:
         return no_update, "Bucket metadata is unavailable. Re-upload the gatheredCN10 file."
-    if not target_label or not year1 or not year2:
-        return no_update, "Select Target Label, Year 1, and Year 2 values before applying."
+    if not year1 or not year2:
+        return no_update, "Select Year 1 and Year 2 values before applying."
 
     try:
         raw_df = raw_df_from_contents(contents, filename)
@@ -2163,11 +2220,13 @@ def apply_bucket_selection(
     except Exception as exc:
         return no_update, f"Error parsing gatheredCN10: {exc}"
 
-    bucket_type_map: dict[str, str] = {}
+    bucket_type_map: dict[str, list[str]] = {}
     for bucket_type, type_id in zip(bucket_types, bucket_type_ids):
         column_id = type_id.get("column")
         if column_id:
-            bucket_type_map[column_id] = bucket_type or "Own"
+            bucket_type_map[column_id] = (
+                [value for value in bucket_type or [] if value]
+            )
 
     selected_columns = []
     for selection, selection_id in zip(selections, selection_ids):
@@ -2175,36 +2234,50 @@ def apply_bucket_selection(
         if column_id and selection:
             selected_columns.append(column_id)
 
+    if not selected_columns:
+        return no_update, "Select at least one bucket column before applying."
+
+    selected_bucket_types = {
+        bucket_type
+        for types in bucket_type_map.values()
+        for bucket_type in types
+    }
+    if not selected_bucket_types:
+        return no_update, "Select Own and/or Cross for the bucket columns."
+
     try:
-        deltas = _compute_bucket_deltas_by_column(
-            data_df,
-            parsed_meta,
-            selected_columns,
-            target_label,
-            year1,
-            year2,
-        )
+        deltas_by_type: dict[str, dict[str, float]] = {}
+        for bucket_type in selected_bucket_types:
+            deltas = _compute_bucket_deltas_by_column(
+                data_df,
+                parsed_meta,
+                selected_columns,
+                bucket_type,
+                year1,
+                year2,
+            )
+            deltas_by_type[bucket_type] = {col_id: value for col_id, value in deltas}
     except Exception as exc:
         return no_update, f"Error computing bucket deltas: {exc}"
 
     labels = []
     values = []
-    column_labels = metadata.get("column_labels", {}) if metadata else {}
-    for column_id, value in deltas:
-        bucket_type = bucket_type_map.get(column_id, "Own")
-        bucket_name = column_labels.get(column_id, column_id)
-        bucket_label = f"{bucket_type} {bucket_name}".strip()
-        labels.append(bucket_label)
-        values.append(value)
+    column_groups = metadata.get("column_groups", {}) if metadata else {}
+    for column_id in selected_columns:
+        bucket_name = column_groups.get(column_id, column_id)
+        for bucket_type in bucket_type_map.get(column_id, []):
+            value = deltas_by_type.get(bucket_type, {}).get(column_id, 0.0)
+            bucket_label = f"{bucket_type} {bucket_name}".strip()
+            labels.append(bucket_label)
+            values.append(value)
 
     bucket_data = {
         "labels": labels,
         "values": values,
-        "target_label": target_label,
         "year1": year1,
         "year2": year2,
     }
-    return bucket_data, f"Applied {len(deltas)} bucket delta(s) to the waterfall."
+    return bucket_data, f"Applied {len(values)} bucket delta(s) to the waterfall."
 
 
 @callback(
