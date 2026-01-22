@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 from dash import Dash, html, dcc, Input, Output, State, callback, no_update
+from openpyxl import load_workbook
 from pptx import Presentation
 from pptx.util import Inches
 from pptx.enum.text import PP_ALIGN
@@ -545,6 +546,96 @@ def _waterfall_base_values(
     year2_total = actuals[base_filter & (year_series == "year2")].sum()
     return year1_total, year2_total
 
+
+def _format_lab_base_value(value: float) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    abs_value = abs(value)
+    if abs_value >= 1_000_000:
+        scaled = value / 1_000_000
+        suffix = "m"
+    elif abs_value >= 1_000:
+        scaled = value / 1_000
+        suffix = "k"
+    else:
+        return str(int(value)) if float(value).is_integer() else str(value)
+    formatted = f"{scaled:g}"
+    return f"{formatted}{suffix}"
+
+
+def _load_chart_workbook(chart):
+    xlsx_blob = chart.part.chart_workbook.xlsx_part.blob
+    return load_workbook(io.BytesIO(xlsx_blob))
+
+
+def _save_chart_workbook(chart, workbook) -> None:
+    stream = io.BytesIO()
+    workbook.save(stream)
+    chart.part.chart_workbook.xlsx_part.blob = stream.getvalue()
+
+
+def _capture_label_columns(ws, series_names: list[str]) -> dict[int, dict[str, list]]:
+    label_columns: dict[int, dict[str, list]] = {}
+    series_lookup = {str(name).strip().lower() for name in series_names if name}
+    for col_idx in range(2, ws.max_column + 1):
+        header = ws.cell(row=1, column=col_idx).value
+        if not header:
+            continue
+        header_text = str(header).strip().lower()
+        if header_text in series_lookup:
+            continue
+        values = [
+            ws.cell(row=row_idx, column=col_idx).value
+            for row_idx in range(2, ws.max_row + 1)
+        ]
+        label_columns[col_idx] = {"header": header, "values": values}
+    return label_columns
+
+
+def _apply_label_columns(ws, label_columns: dict[int, dict[str, list]], total_rows: int) -> None:
+    for col_idx, column in label_columns.items():
+        ws.cell(row=1, column=col_idx, value=column["header"])
+        values = column["values"]
+        if len(values) < total_rows:
+            values = values + [None] * (total_rows - len(values))
+        for row_offset in range(total_rows):
+            ws.cell(row=row_offset + 2, column=col_idx, value=values[row_offset])
+
+
+def _update_lab_base_label(
+    label_columns: dict[int, dict[str, list]],
+    base_indices: tuple[int, int] | None,
+    base_value: float | None,
+    total_rows: int,
+) -> None:
+    if base_indices is None or base_value is None:
+        return
+    base_row = base_indices[0]
+    if base_row is None or base_row < 0:
+        return
+    formatted = _format_lab_base_value(base_value)
+    for column in label_columns.values():
+        header = str(column["header"]).strip().lower()
+        if header == "labs-base":
+            values = column["values"]
+            if len(values) < total_rows:
+                values.extend([None] * (total_rows - len(values)))
+            if base_row < len(values):
+                values[base_row] = formatted
+            column["values"] = values
+            return
+
+
+def _set_waterfall_chart_title(chart, label: str | None) -> None:
+    if not label:
+        return
+    title_text = f"{label} Waterfall"
+    try:
+        chart.has_title = True
+        chart.chart_title.text_frame.text = title_text
+    except Exception:
+        return
+
 def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     """
     If a chart with name=chart_name exists on the slide, update its data.
@@ -1045,7 +1136,7 @@ def _build_waterfall_chart_data(
     scope_df: pd.DataFrame | None,
     gathered_df: pd.DataFrame | None = None,
     target_level_label: str | None = None,
-) -> ChartData:
+) -> tuple[ChartData, list[str], tuple[int, int] | None, tuple[float, float] | None, list[tuple[str, list[float]]]]:
     categories = _categories_from_chart(chart)
     base_indices = _waterfall_base_indices(categories)
     categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
@@ -1058,6 +1149,7 @@ def _build_waterfall_chart_data(
         base_values = _waterfall_base_values(gathered_df, target_level_label)
     cd = ChartData()
     cd.categories = categories
+    series_values: list[tuple[str, list[float]]] = []
     for series in chart.series:
         values = list(series.values)
         if base_values and base_indices:
@@ -1070,7 +1162,8 @@ def _build_waterfall_chart_data(
                 if base_indices[1] < len(values):
                     values[base_indices[1]] = base_values[1]
         cd.add_series(series.name, values)
-    return cd
+        series_values.append((series.name, values))
+    return cd, categories, base_indices, base_values, series_values
 
 
 def _add_waterfall_chart_from_template(
@@ -1085,7 +1178,12 @@ def _add_waterfall_chart_from_template(
     if template_shape is None:
         raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
     template_chart = template_shape.chart
-    cd = _build_waterfall_chart_data(
+    template_series_names = [series.name for series in template_chart.series]
+    label_columns = _capture_label_columns(
+        _load_chart_workbook(template_chart).active,
+        template_series_names,
+    )
+    cd, categories, base_indices, base_values, _ = _build_waterfall_chart_data(
         template_chart,
         scope_df,
         gathered_df,
@@ -1105,6 +1203,17 @@ def _add_waterfall_chart_from_template(
         cd,
     )
     chart_shape.name = getattr(template_shape, "name", chart_name)
+    _set_waterfall_chart_title(chart_shape.chart, target_level_label)
+    updated_wb = _load_chart_workbook(chart_shape.chart)
+    total_rows = len(categories)
+    _update_lab_base_label(
+        label_columns,
+        base_indices,
+        base_values[0] if base_values else None,
+        total_rows,
+    )
+    _apply_label_columns(updated_wb.active, label_columns, total_rows)
+    _save_chart_workbook(chart_shape.chart, updated_wb)
     return chart_shape
 
 
@@ -1134,13 +1243,26 @@ def _update_waterfall_chart(
     chart = _waterfall_chart_from_slide(slide, "Waterfall Template")
     if chart is None:
         raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
-    cd = _build_waterfall_chart_data(
+    series_names = [series.name for series in chart.series]
+    label_columns = _capture_label_columns(_load_chart_workbook(chart).active, series_names)
+    cd, categories, base_indices, base_values, _ = _build_waterfall_chart_data(
         chart,
         scope_df,
         gathered_df,
         target_level_label,
     )
     chart.replace_data(cd)
+    _set_waterfall_chart_title(chart, target_level_label)
+    updated_wb = _load_chart_workbook(chart)
+    total_rows = len(categories)
+    _update_lab_base_label(
+        label_columns,
+        base_indices,
+        base_values[0] if base_values else None,
+        total_rows,
+    )
+    _apply_label_columns(updated_wb.active, label_columns, total_rows)
+    _save_chart_workbook(chart, updated_wb)
 
 
 def populate_category_waterfall(
