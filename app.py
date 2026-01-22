@@ -2030,7 +2030,7 @@ def populate_bucket_controls(contents, filename):
 
 @callback(
     Output("bucket-deltas", "data"),
-    Output("bucket-status", "children"),
+    Output("bucket-status", "children", allow_duplicate=True),
     Input("apply-buckets", "n_clicks"),
     State("data-upload", "contents"),
     State("data-upload", "filename"),
