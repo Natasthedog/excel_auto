@@ -2128,17 +2128,6 @@ def populate_bucket_controls(contents, filename):
                             labelStyle={"display": "block", "marginBottom": "4px"},
                             inputStyle={"marginRight": "6px"},
                         ),
-                        dcc.Checklist(
-                            id={"type": "bucket-column-type", "column": column_id},
-                            options=[
-                                {"label": "Own", "value": "Own"},
-                                {"label": "Cross", "value": "Cross"},
-                            ],
-                            value=["Own"],
-                            labelStyle={"display": "block", "marginBottom": "2px"},
-                            inputStyle={"marginRight": "6px"},
-                            style={"minWidth": "120px"},
-                        ),
                     ],
                     style={
                         "display": "flex",
@@ -2153,6 +2142,17 @@ def populate_bucket_controls(contents, filename):
             html.Div(
                 [
                     html.Label(group, style={"fontWeight": "600"}),
+                    dcc.Checklist(
+                        id={"type": "bucket-group-type", "group": group},
+                        options=[
+                            {"label": "Own", "value": "Own"},
+                            {"label": "Cross", "value": "Cross"},
+                        ],
+                        value=["Own"],
+                        labelStyle={"display": "block", "marginBottom": "2px"},
+                        inputStyle={"marginRight": "6px"},
+                        style={"minWidth": "120px", "marginBottom": "8px"},
+                    ),
                     *column_rows,
                 ],
                 style={
@@ -2191,8 +2191,8 @@ def populate_bucket_controls(contents, filename):
     State("bucket-metadata", "data"),
     State({"type": "bucket-column", "column": ALL}, "value"),
     State({"type": "bucket-column", "column": ALL}, "id"),
-    State({"type": "bucket-column-type", "column": ALL}, "value"),
-    State({"type": "bucket-column-type", "column": ALL}, "id"),
+    State({"type": "bucket-group-type", "group": ALL}, "value"),
+    State({"type": "bucket-group-type", "group": ALL}, "id"),
     prevent_initial_call=True,
 )
 def apply_bucket_selection(
@@ -2222,11 +2222,9 @@ def apply_bucket_selection(
 
     bucket_type_map: dict[str, list[str]] = {}
     for bucket_type, type_id in zip(bucket_types, bucket_type_ids):
-        column_id = type_id.get("column")
-        if column_id:
-            bucket_type_map[column_id] = (
-                [value for value in bucket_type or [] if value]
-            )
+        group = type_id.get("group")
+        if group:
+            bucket_type_map[group] = [value for value in bucket_type or [] if value]
 
     selected_columns = []
     for selection, selection_id in zip(selections, selection_ids):
@@ -2237,13 +2235,16 @@ def apply_bucket_selection(
     if not selected_columns:
         return no_update, "Select at least one bucket column before applying."
 
+    column_groups = metadata.get("column_groups", {}) if metadata else {}
+    selected_groups = {column_groups.get(column_id) for column_id in selected_columns}
+    selected_groups.discard(None)
     selected_bucket_types = {
         bucket_type
-        for types in bucket_type_map.values()
-        for bucket_type in types
+        for group in selected_groups
+        for bucket_type in bucket_type_map.get(group, [])
     }
     if not selected_bucket_types:
-        return no_update, "Select Own and/or Cross for the bucket columns."
+        return no_update, "Select Own and/or Cross for the bucket groups."
 
     try:
         deltas_by_type: dict[str, dict[str, float]] = {}
@@ -2262,10 +2263,9 @@ def apply_bucket_selection(
 
     labels = []
     values = []
-    column_groups = metadata.get("column_groups", {}) if metadata else {}
     for column_id in selected_columns:
         bucket_name = column_groups.get(column_id, column_id)
-        for bucket_type in bucket_type_map.get(column_id, []):
+        for bucket_type in bucket_type_map.get(bucket_name, []):
             value = deltas_by_type.get(bucket_type, {}).get(column_id, 0.0)
             bucket_label = f"{bucket_type} {bucket_name}".strip()
             labels.append(bucket_label)
