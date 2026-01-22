@@ -631,26 +631,13 @@ def _unique_column_values(data_df: pd.DataFrame, column_id: str) -> list[str]:
 def _compute_bucket_deltas(
     data_df: pd.DataFrame,
     metadata: dict,
-    selections: dict[str, list[str]],
-    target_label: str,
+    bucket_config: dict[str, dict[str, list[str]]],
     year1: str,
     year2: str,
 ) -> list[tuple[str, float]]:
     """Compute Year2-Year1 deltas for each bucket group.
 
-    Example:
-        >>> raw = pd.DataFrame(
-        ...     [
-        ...         ["Promo", "Promo", "", ""],
-        ...         ["Feature", "Display", "Target Label", "Year"],
-        ...         [10, 5, "Own", "2023"],
-        ...         [20, 10, "Own", "2024"],
-        ...     ]
-        ... )
-        >>> data_df, meta = _parse_two_row_header_dataframe(raw)
-        >>> selections = {"Promo": ["col_0", "col_1"]}
-        >>> _compute_bucket_deltas(data_df, meta, selections, "Own", "2023", "2024")
-        [('Promo', 15.0)]
+    bucket_config maps group -> {"target_labels": [...], "subheaders_included": [...]}
     """
     target_label_id = metadata.get("target_label_id")
     year_id = metadata.get("year_id")
@@ -659,7 +646,6 @@ def _compute_bucket_deltas(
     if not year_id:
         raise ValueError("The gatheredCN10 file is missing the Year column.")
 
-    normalized_target = _normalize_text_value(target_label)
     normalized_year1 = _normalize_text_value(year1)
     normalized_year2 = _normalize_text_value(year2)
 
@@ -667,20 +653,31 @@ def _compute_bucket_deltas(
     year_series = data_df[year_id].map(_normalize_text_value)
 
     deltas: list[tuple[str, float]] = []
-    for group in metadata.get("group_order", []):
-        selected_cols = selections.get(group, [])
+    group_order = metadata.get("group_order", [])
+    ordered_groups = [group for group in group_order if group in bucket_config]
+    if not ordered_groups:
+        ordered_groups = list(bucket_config.keys())
+    for group in ordered_groups:
+        config = bucket_config.get(group, {})
+        selected_cols = [
+            col for col in config.get("subheaders_included", []) if col in data_df.columns
+        ]
         if not selected_cols:
             deltas.append((group, 0.0))
             continue
-        selected_cols = [col for col in selected_cols if col in data_df.columns]
-        if not selected_cols:
+        target_labels = config.get("target_labels") or ["Own", "Cross"]
+        normalized_targets = {
+            _normalize_text_value(label) for label in target_labels if label
+        }
+        if not normalized_targets:
             deltas.append((group, 0.0))
             continue
         values_df = data_df[selected_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-        year1_mask = (target_series == normalized_target) & (year_series == normalized_year1)
-        year2_mask = (target_series == normalized_target) & (year_series == normalized_year2)
-        year1_sum = values_df[year1_mask].sum().sum()
-        year2_sum = values_df[year2_mask].sum().sum()
+        year1_mask = year_series == normalized_year1
+        year2_mask = year_series == normalized_year2
+        target_mask = target_series.isin(normalized_targets)
+        year1_sum = values_df[year1_mask & target_mask].sum().sum()
+        year2_sum = values_df[year2_mask & target_mask].sum().sum()
         deltas.append((group, float(year2_sum - year1_sum)))
     return deltas
 
@@ -1867,6 +1864,7 @@ app.layout = html.Div(
         html.H2("PowerPoint Deck Automator (Dash + python-pptx)"),
         html.P("Upload your data, pick the project, and we will fill the matching PPTX template."),
         dcc.Store(id="bucket-metadata"),
+        dcc.Store(id="bucket-config"),
         dcc.Store(id="bucket-deltas"),
         html.Div(
             [
@@ -2142,13 +2140,17 @@ def populate_bucket_controls(contents, filename):
             html.Div(
                 [
                     html.Label(group, style={"fontWeight": "600"}),
+                    html.Label(
+                        "Target Label filter",
+                        style={"fontSize": "0.85rem", "color": "#6B7280"},
+                    ),
                     dcc.Checklist(
                         id={"type": "bucket-group-type", "group": group},
                         options=[
                             {"label": "Own", "value": "Own"},
                             {"label": "Cross", "value": "Cross"},
                         ],
-                        value=["Own"],
+                        value=["Own", "Cross"],
                         labelStyle={"display": "block", "marginBottom": "2px"},
                         inputStyle={"marginRight": "6px"},
                         style={"minWidth": "120px", "marginBottom": "8px"},
@@ -2181,6 +2183,7 @@ def populate_bucket_controls(contents, filename):
 
 
 @callback(
+    Output("bucket-config", "data"),
     Output("bucket-deltas", "data"),
     Output("bucket-status", "children", allow_duplicate=True),
     Input("apply-buckets", "n_clicks"),
@@ -2208,17 +2211,21 @@ def apply_bucket_selection(
     bucket_type_ids,
 ):
     if not contents:
-        return no_update, "Upload a gatheredCN10 file before applying buckets."
+        return no_update, no_update, "Upload a gatheredCN10 file before applying buckets."
     if not metadata:
-        return no_update, "Bucket metadata is unavailable. Re-upload the gatheredCN10 file."
+        return (
+            no_update,
+            no_update,
+            "Bucket metadata is unavailable. Re-upload the gatheredCN10 file.",
+        )
     if not year1 or not year2:
-        return no_update, "Select Year 1 and Year 2 values before applying."
+        return no_update, no_update, "Select Year 1 and Year 2 values before applying."
 
     try:
         raw_df = raw_df_from_contents(contents, filename)
         data_df, parsed_meta = _parse_two_row_header_dataframe(raw_df)
     except Exception as exc:
-        return no_update, f"Error parsing gatheredCN10: {exc}"
+        return no_update, no_update, f"Error parsing gatheredCN10: {exc}"
 
     bucket_type_map: dict[str, list[str]] = {}
     for bucket_type, type_id in zip(bucket_types, bucket_type_ids):
@@ -2233,43 +2240,49 @@ def apply_bucket_selection(
             selected_columns.append(column_id)
 
     if not selected_columns:
-        return no_update, "Select at least one bucket column before applying."
+        return no_update, no_update, "Select at least one bucket column before applying."
 
     column_groups = metadata.get("column_groups", {}) if metadata else {}
-    selected_groups = {column_groups.get(column_id) for column_id in selected_columns}
-    selected_groups.discard(None)
-    selected_bucket_types = {
-        bucket_type
-        for group in selected_groups
-        for bucket_type in bucket_type_map.get(group, [])
-    }
-    if not selected_bucket_types:
-        return no_update, "Select Own and/or Cross for the bucket groups."
+    group_columns: dict[str, list[str]] = {}
+    for column_id in selected_columns:
+        group = column_groups.get(column_id)
+        if group:
+            group_columns.setdefault(group, []).append(column_id)
+
+    if not group_columns:
+        return no_update, no_update, "Select at least one bucket column before applying."
+
+    bucket_config: dict[str, dict[str, list[str]]] = {}
+    for group in metadata.get("group_order", []):
+        selected_group_columns = group_columns.get(group, [])
+        if not selected_group_columns:
+            continue
+        target_labels = bucket_type_map.get(group)
+        if target_labels is None:
+            target_labels = ["Own", "Cross"]
+        if not target_labels:
+            return no_update, no_update, "Select Own and/or Cross for the bucket groups."
+        bucket_config[group] = {
+            "target_labels": target_labels,
+            "subheaders_included": selected_group_columns,
+        }
+
+    if not bucket_config:
+        return no_update, no_update, "Select at least one bucket column before applying."
 
     try:
-        deltas_by_type: dict[str, dict[str, float]] = {}
-        for bucket_type in selected_bucket_types:
-            deltas = _compute_bucket_deltas_by_column(
-                data_df,
-                parsed_meta,
-                selected_columns,
-                bucket_type,
-                year1,
-                year2,
-            )
-            deltas_by_type[bucket_type] = {col_id: value for col_id, value in deltas}
+        deltas = _compute_bucket_deltas(
+            data_df,
+            parsed_meta,
+            bucket_config,
+            year1,
+            year2,
+        )
     except Exception as exc:
-        return no_update, f"Error computing bucket deltas: {exc}"
+        return no_update, no_update, f"Error computing bucket deltas: {exc}"
 
-    labels = []
-    values = []
-    for column_id in selected_columns:
-        bucket_name = column_groups.get(column_id, column_id)
-        for bucket_type in bucket_type_map.get(bucket_name, []):
-            value = deltas_by_type.get(bucket_type, {}).get(column_id, 0.0)
-            bucket_label = f"{bucket_type} {bucket_name}".strip()
-            labels.append(bucket_label)
-            values.append(value)
+    labels = [group for group, _ in deltas]
+    values = [value for _, value in deltas]
 
     bucket_data = {
         "labels": labels,
@@ -2277,7 +2290,7 @@ def apply_bucket_selection(
         "year1": year1,
         "year2": year2,
     }
-    return bucket_data, f"Applied {len(values)} bucket delta(s) to the waterfall."
+    return bucket_config, bucket_data, f"Applied {len(values)} bucket delta(s) to the waterfall."
 
 
 @callback(
