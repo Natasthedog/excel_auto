@@ -605,25 +605,29 @@ def _apply_label_columns(ws, label_columns: dict[int, dict[str, list]], total_ro
 def _update_lab_base_label(
     label_columns: dict[int, dict[str, list]],
     base_indices: tuple[int, int] | None,
-    base_value: float | None,
+    base_values: tuple[float, float] | None,
     total_rows: int,
 ) -> None:
-    if base_indices is None or base_value is None:
+    if base_indices is None or base_values is None:
         return
-    base_row = base_indices[0]
-    if base_row is None or base_row < 0:
-        return
-    formatted = _format_lab_base_value(base_value)
+    formatted_values = [
+        _format_lab_base_value(value) for value in base_values
+    ]
+    base_rows = list(base_indices)
     for column in label_columns.values():
         header = str(column["header"]).strip().lower()
-        if header == "labs-base":
-            values = column["values"]
-            if len(values) < total_rows:
-                values.extend([None] * (total_rows - len(values)))
+        if header != "labs-base":
+            continue
+        values = column["values"]
+        if len(values) < total_rows:
+            values.extend([None] * (total_rows - len(values)))
+        for idx, base_row in enumerate(base_rows):
+            if base_row is None or base_row < 0:
+                continue
             if base_row < len(values):
-                values[base_row] = formatted
-            column["values"] = values
-            return
+                values[base_row] = formatted_values[idx]
+        column["values"] = values
+        return
 
 
 def _set_waterfall_chart_title(chart, label: str | None) -> None:
@@ -1209,7 +1213,7 @@ def _add_waterfall_chart_from_template(
     _update_lab_base_label(
         label_columns,
         base_indices,
-        base_values[0] if base_values else None,
+        base_values,
         total_rows,
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
@@ -1258,7 +1262,7 @@ def _update_waterfall_chart(
     _update_lab_base_label(
         label_columns,
         base_indices,
-        base_values[0] if base_values else None,
+        base_values,
         total_rows,
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
