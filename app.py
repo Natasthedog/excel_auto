@@ -22,7 +22,7 @@ from dash import (
     callback_context,
 )
 from openpyxl import load_workbook
-from openpyxl.utils import range_boundaries
+from openpyxl.utils import range_boundaries, get_column_letter
 import numbers
 from pptx import Presentation
 from pptx.util import Inches
@@ -960,6 +960,52 @@ def _range_cells_from_worksheet(ws, ref: str) -> list[list]:
     return rows
 
 
+def _worksheet_and_range_from_formula(workbook, formula: str) -> tuple:
+    if not formula:
+        return workbook.active, "", None
+    sheet_name = None
+    ref = str(formula)
+    if "!" in ref:
+        sheet_part, ref = ref.split("!", 1)
+        sheet_name = sheet_part.strip("'")
+    ref = ref.replace("$", "")
+    ws = workbook.active
+    if sheet_name and sheet_name in workbook.sheetnames:
+        ws = workbook[sheet_name]
+    return ws, ref, sheet_name
+
+
+def _format_sheet_reference(sheet_name: str) -> str:
+    if sheet_name is None:
+        return ""
+    if sheet_name.startswith("'") and sheet_name.endswith("'"):
+        return sheet_name
+    if re.search(r"[^A-Za-z0-9_]", sheet_name):
+        return f"'{sheet_name}'"
+    return sheet_name
+
+
+def _build_cell_range_formula(sheet_name: str | None, col_idx: int, row_start: int, row_end: int) -> str:
+    col_letter = get_column_letter(col_idx)
+    sheet_prefix = ""
+    if sheet_name:
+        sheet_prefix = f"{_format_sheet_reference(sheet_name)}!"
+    return f"{sheet_prefix}${col_letter}${row_start}:${col_letter}${row_end}"
+
+
+def _range_boundaries_from_formula(formula: str) -> tuple[int, int, int, int] | None:
+    if not formula:
+        return None
+    ref = str(formula)
+    if "!" in ref:
+        _, ref = ref.split("!", 1)
+    ref = ref.replace("$", "")
+    try:
+        return range_boundaries(ref)
+    except ValueError:
+        return None
+
+
 def _flatten_cell_values(values: list[list]) -> list:
     if not values:
         return []
@@ -1108,6 +1154,11 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
     categories_count = len(categories_values)
     logger.info("Waterfall chart cache update: %s category points", categories_count)
 
+    series_names = [series.name for series in chart.series]
+    series_point_counts: dict[int, int] = {}
+    series_category_bounds: dict[int, tuple[int, int, str | None]] = {}
+    series_value_bounds: dict[int, tuple[int, int, str | None]] = {}
+
     for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
         num_ref = ser.find("c:val/c:numRef", namespaces=nsmap)
         if num_ref is None:
@@ -1115,46 +1166,183 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
         f_node = num_ref.find("c:f", namespaces=nsmap)
         if f_node is None or not f_node.text:
             continue
-        value_rows = _range_cells_from_worksheet(ws, f_node.text)
+        value_ws, value_ref, _ = _worksheet_and_range_from_formula(workbook, f_node.text)
+        value_rows = _range_cells_from_worksheet(value_ws, value_ref)
         series_values = _flatten_cell_values(value_rows)
         num_cache = num_ref.find("c:numCache", namespaces=nsmap)
         _update_num_cache(num_cache, series_values)
+        series_point_counts[idx] = len(series_values)
+        bounds = _range_boundaries_from_formula(f_node.text)
+        if bounds:
+            _, min_row, _, max_row = bounds
+            series_value_bounds[idx] = (min_row, max_row, value_ws.title)
         logger.info(
             "Waterfall chart cache update: series %s cached %s points",
             idx,
             len(series_values),
         )
 
-    updated_categories = False
-    for cat_ref in root.findall(".//c:cat/c:strRef", namespaces=nsmap):
-        str_cache = cat_ref.find("c:strCache", namespaces=nsmap)
-        if str_cache is None:
+    category_cache_updates = 0
+    category_cache_count = None
+    for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
+        series_label = series_names[idx - 1] if idx - 1 < len(series_names) else f"Series {idx}"
+        cat_node = ser.find("c:cat", namespaces=nsmap)
+        if cat_node is None:
+            logger.info(
+                "Waterfall chart cache update: series %s category ref not found",
+                series_label,
+            )
             continue
-        _update_str_cache(str_cache, categories_values)
-        updated_categories = True
-    if updated_categories:
-        logger.info("Waterfall chart cache update: %s category cache points", categories_count)
+        cat_ref = cat_node.find("c:strRef", namespaces=nsmap)
+        cat_ref_type = "strRef"
+        if cat_ref is None:
+            cat_ref = cat_node.find("c:numRef", namespaces=nsmap)
+            cat_ref_type = "numRef"
+        if cat_ref is None:
+            logger.info(
+                "Waterfall chart cache update: series %s category ref not found",
+                series_label,
+            )
+            continue
+        f_node = cat_ref.find("c:f", namespaces=nsmap)
+        if f_node is None or not f_node.text:
+            logger.info(
+                "Waterfall chart cache update: series %s category ref formula missing",
+                series_label,
+            )
+            continue
+        logger.info(
+            "Waterfall chart cache update: series %s category ref formula %s",
+            series_label,
+            f_node.text,
+        )
+        cat_ws, cat_ref_range, cat_sheet = _worksheet_and_range_from_formula(
+            workbook, f_node.text
+        )
+        category_rows = _range_values_from_worksheet(cat_ws, cat_ref_range)
+        category_values = _flatten_cell_values(category_rows)
+        if not category_values and categories_values:
+            category_values = categories_values
+        category_values = ["" if value is None else str(value) for value in category_values]
+        bounds = _range_boundaries_from_formula(f_node.text)
+        if bounds:
+            _, min_row, _, max_row = bounds
+            series_category_bounds[idx] = (min_row, max_row, cat_sheet or cat_ws.title)
+        if cat_ref_type == "strRef":
+            str_cache = cat_ref.find("c:strCache", namespaces=nsmap)
+            if str_cache is None:
+                continue
+            _update_str_cache(str_cache, category_values)
+        else:
+            num_cache = cat_ref.find("c:numCache", namespaces=nsmap)
+            if num_cache is None:
+                continue
+            _update_num_cache(num_cache, category_values)
+        category_cache_updates += 1
+        category_cache_count = len(category_values)
+        logger.info(
+            "Waterfall chart cache update: series %s cached %s category points",
+            series_label,
+            len(category_values),
+        )
+    if category_cache_updates:
+        logger.info(
+            "Waterfall chart cache update: %s category cache points",
+            category_cache_count if category_cache_count is not None else categories_count,
+        )
 
     label_cache_updates = 0
     label_cache_missing = 0
-    for ref_node in root.findall(".//c:dLbls//c:tx/c:strRef", namespaces=nsmap):
-        f_node = ref_node.find("c:f", namespaces=nsmap)
-        if f_node is None or not f_node.text:
+    for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
+        series_label = series_names[idx - 1] if idx - 1 < len(series_names) else f"Series {idx}"
+        chart_series = chart.series[idx - 1] if idx - 1 < len(chart.series) else None
+        label_refs = ser.findall(".//c:dLbls//c:dLbl//c:tx//c:strRef", namespaces=nsmap)
+        label_refs += ser.findall(".//c:dLbls//c:tx//c:strRef", namespaces=nsmap)
+        seen_refs = set()
+        deduped_refs = []
+        for ref in label_refs:
+            if id(ref) in seen_refs:
+                continue
+            seen_refs.add(id(ref))
+            deduped_refs.append(ref)
+        if not deduped_refs:
             continue
-        label_rows = _range_values_from_worksheet(ws, f_node.text)
-        label_values = _flatten_cell_values(label_rows)
-        str_cache = ref_node.find("c:strCache", namespaces=nsmap)
-        if str_cache is None:
-            label_cache_missing += 1
-            continue
-        _update_str_cache(str_cache, ["" if value is None else str(value) for value in label_values])
-        label_cache_updates += 1
+        labs_column = None
+        if chart_series is not None and _is_positive_series(chart_series):
+            labs_column = _find_header_column(ws, ["labs-Positives"])
+        elif chart_series is not None and _is_negative_series(chart_series):
+            labs_column = _find_header_column(ws, ["labs-Negatives"])
+        if chart_series is not None and labs_column is None:
+            logger.info(
+                "Waterfall chart cache update: series %s data label column missing for labs",
+                series_label,
+            )
+        for ref_node in deduped_refs:
+            f_node = ref_node.find("c:f", namespaces=nsmap)
+            if f_node is None or not f_node.text:
+                logger.info(
+                    "Waterfall chart cache update: series %s data label ref formula missing",
+                    series_label,
+                )
+                continue
+            logger.info(
+                "Waterfall chart cache update: series %s data label ref formula %s",
+                series_label,
+                f_node.text,
+            )
+            expected_formula = None
+            if labs_column:
+                bounds = series_category_bounds.get(idx) or series_value_bounds.get(idx)
+                if bounds:
+                    min_row, max_row, sheet_name = bounds
+                    expected_formula = _build_cell_range_formula(
+                        sheet_name,
+                        labs_column,
+                        min_row,
+                        max_row,
+                    )
+                    if f_node.text != expected_formula:
+                        f_node.text = expected_formula
+            label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
+                workbook, f_node.text
+            )
+            label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
+            label_values = _flatten_cell_values(label_rows)
+            series_points = series_point_counts.get(idx, len(label_values))
+            if len(label_values) < series_points:
+                label_values += ["" for _ in range(series_points - len(label_values))]
+            elif len(label_values) > series_points:
+                label_values = label_values[:series_points]
+            str_cache = ref_node.find("c:strCache", namespaces=nsmap)
+            if str_cache is None:
+                label_cache_missing += 1
+                continue
+            _update_str_cache(
+                str_cache,
+                ["" if value is None else str(value) for value in label_values],
+            )
+            label_cache_updates += 1
+            logger.info(
+                "Waterfall chart cache update: series %s cached %s data label points",
+                series_label,
+                len(label_values),
+            )
+            if expected_formula:
+                logger.info(
+                    "Waterfall chart cache update: series %s data label ref updated to %s",
+                    series_label,
+                    expected_formula,
+                )
     if label_cache_updates:
         logger.info(
             "Waterfall chart cache update: %s data label caches updated",
             label_cache_updates,
         )
     elif label_cache_missing:
+        logger.info(
+            "Waterfall chart cache update: chart is not using value-from-cells labels",
+        )
+    else:
         logger.info(
             "Waterfall chart cache update: chart is not using value-from-cells labels",
         )
