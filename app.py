@@ -2045,6 +2045,15 @@ def _shape_text_snippet(shape) -> str:
     return compact[:80]
 
 
+def _chart_title_text_frame(chart):
+    try:
+        if chart.has_title:
+            return chart.chart_title.text_frame
+    except Exception:
+        return None
+    return None
+
+
 def _slide_title(slide) -> str:
     try:
         title_shape = slide.shapes.title
@@ -2081,6 +2090,11 @@ def _slides_with_placeholder(prs, placeholder: str) -> list[int]:
                         break
             if found:
                 break
+            if shape.has_chart:
+                chart_text_frame = _chart_title_text_frame(shape.chart)
+                if chart_text_frame and placeholder in (chart_text_frame.text or ""):
+                    found = True
+                    break
         if found:
             matches.append(idx)
     return matches
@@ -2126,6 +2140,12 @@ def replace_placeholders_strict(prs, slide_selector, replacements: dict[str, str
                     _replace_placeholders_in_text_frame(
                         cell.text_frame, replacements, counts
                     )
+        if shape.has_chart:
+            chart_text_frame = _chart_title_text_frame(shape.chart)
+            if chart_text_frame is not None:
+                _replace_placeholders_in_text_frame(
+                    chart_text_frame, replacements, counts
+                )
 
     slide_idx = _slide_index(prs, slide)
     slide_title = _slide_title(slide)
@@ -2141,6 +2161,16 @@ def replace_placeholders_strict(prs, slide_selector, replacements: dict[str, str
             f"has_table={shape.has_table} "
             f"text={_shape_text_snippet(shape)!r}"
         )
+        if shape.has_chart:
+            chart_text_frame = _chart_title_text_frame(shape.chart)
+            if chart_text_frame is not None:
+                chart_text = chart_text_frame.text or ""
+                compact = " ".join(chart_text.split())
+                shape_lines.append(
+                    " - "
+                    f"chart_title={compact[:80]!r} "
+                    f"shape_name={getattr(shape, 'name', None)!r}"
+                )
     counts_lines = [
         f" - {placeholder}: found={stats['found']} replaced={stats['replaced']}"
         for placeholder, stats in counts.items()
