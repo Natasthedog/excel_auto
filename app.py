@@ -38,6 +38,7 @@ PROJECT_TEMPLATES = {
     "MMx": TEMPLATE_DIR / "MMx.pptx",
     "MMM": TEMPLATE_DIR / "MMM.pptx",
 }
+DISPLAY_LABEL = {"Own": "Own", "Cross": "Competitor"}
 
 
 @dataclass(frozen=True)
@@ -785,7 +786,8 @@ def _compute_bucket_deltas(
             continue
         if not selected_cols:
             for label, _ in target_label_sequence:
-                deltas.append((f"{label} {group}", 0.0))
+                display_label = DISPLAY_LABEL.get(label, label)
+                deltas.append((f"{display_label} {group}", 0.0))
             continue
         values_df = data_df[selected_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         year1_mask = year_series == normalized_year1
@@ -794,7 +796,8 @@ def _compute_bucket_deltas(
             target_mask = target_series == normalized
             year1_sum = values_df[year1_mask & target_mask].sum().sum()
             year2_sum = values_df[year2_mask & target_mask].sum().sum()
-            deltas.append((f"{label} {group}", float(year2_sum - year1_sum)))
+            display_label = DISPLAY_LABEL.get(label, label)
+            deltas.append((f"{display_label} {group}", float(year2_sum - year1_sum)))
     return deltas
 
 
@@ -2724,8 +2727,8 @@ def populate_bucket_controls(contents, filename):
                     dcc.Checklist(
                         id={"type": "bucket-group-type", "group": group},
                         options=[
-                            {"label": "Own", "value": "Own"},
-                            {"label": "Cross", "value": "Cross"},
+                            {"label": DISPLAY_LABEL["Own"], "value": "Own"},
+                            {"label": DISPLAY_LABEL["Cross"], "value": "Cross"},
                         ],
                         value=[],
                         labelStyle={"display": "block", "marginBottom": "2px"},
