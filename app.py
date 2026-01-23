@@ -2607,7 +2607,7 @@ def _build_waterfall_chart_data(
     categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
     original_base_indices = base_indices
     bucket_labels = list(bucket_labels or [])
-    bucket_values = [safe_float(value) for value in (bucket_values or [])]
+    bucket_values = [float(value) for value in (bucket_values or [])]
     if bucket_labels and bucket_values:
         bucket_len = min(len(bucket_labels), len(bucket_values))
         bucket_labels = bucket_labels[:bucket_len]
@@ -2630,13 +2630,13 @@ def _build_waterfall_chart_data(
     cd.categories = categories
     base_start_value = None
     if base_values and base_values[0] is not None:
-        base_start_value = safe_float(base_values[0])
+        base_start_value = float(base_values[0])
     elif base_indices is not None:
         for series in chart.series:
             if _should_update_base_series(series):
                 series_values = list(series.values)
                 if base_indices[0] < len(series_values):
-                    base_start_value = safe_float(series_values[base_indices[0]])
+                    base_start_value = float(series_values[base_indices[0]])
                 break
     if base_start_value is None:
         base_start_value = 0.0
