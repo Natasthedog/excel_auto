@@ -966,11 +966,27 @@ def _worksheet_and_range_from_formula(workbook, formula: str) -> tuple:
     sheet_name = None
     ref = str(formula)
     if "!" in ref:
-        sheet_part, ref = ref.split("!", 1)
-        sheet_name = sheet_part.strip("'")
+        match = re.match(
+            r"^(?P<sheet>(?:'[^']*(?:''[^']*)*'|[^!]+))!(?P<ref>.+)$",
+            ref,
+        )
+        if match:
+            sheet_part = match.group("sheet")
+            ref = match.group("ref")
+            if sheet_part.startswith("'") and sheet_part.endswith("'"):
+                sheet_name = sheet_part[1:-1].replace("''", "'")
+            else:
+                sheet_name = sheet_part
+        else:
+            sheet_part, ref = ref.split("!", 1)
+            sheet_name = sheet_part.strip("'")
     ref = ref.replace("$", "")
     ws = workbook.active
-    if sheet_name and sheet_name in workbook.sheetnames:
+    if sheet_name:
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(
+                f"Chart cache: sheet '{sheet_name}' from formula '{formula}' not found."
+            )
         ws = workbook[sheet_name]
     return ws, ref, sheet_name
 
@@ -1088,6 +1104,30 @@ def safe_float(
     return converted
 
 
+def _all_blank(values: list) -> bool:
+    if not values:
+        return True
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and value.strip() == "":
+            continue
+        return False
+    return True
+
+
+def _ensure_str_cache(str_ref) -> tuple:
+    str_cache = str_ref.find("c:strCache", namespaces=_chart_namespace_map(str_ref))
+    created = False
+    if str_cache is None:
+        str_cache = etree.SubElement(
+            str_ref,
+            "{http://schemas.openxmlformats.org/drawingml/2006/chart}strCache",
+        )
+        created = True
+    return str_cache, created
+
+
 def _update_num_cache(num_cache, values: list) -> None:
     if num_cache is None:
         return
@@ -1195,9 +1235,11 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
             continue
         cat_ref = cat_node.find("c:strRef", namespaces=nsmap)
         cat_ref_type = "strRef"
+        num_ref = None
         if cat_ref is None:
-            cat_ref = cat_node.find("c:numRef", namespaces=nsmap)
+            num_ref = cat_node.find("c:numRef", namespaces=nsmap)
             cat_ref_type = "numRef"
+            cat_ref = num_ref
         if cat_ref is None:
             logger.info(
                 "Waterfall chart cache update: series %s category ref not found",
@@ -1212,6 +1254,23 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
             )
             continue
         logger.info(
+            "Waterfall chart cache update: series %s category ref type %s formula %s",
+            series_label,
+            cat_ref_type,
+            f_node.text,
+        )
+        if cat_ref_type == "numRef" and num_ref is not None:
+            f_text = f_node.text
+            num_ref_index = list(cat_node).index(num_ref)
+            cat_node.remove(num_ref)
+            cat_ref = etree.Element("{http://schemas.openxmlformats.org/drawingml/2006/chart}strRef")
+            f_node = etree.SubElement(
+                cat_ref, "{http://schemas.openxmlformats.org/drawingml/2006/chart}f"
+            )
+            f_node.text = f_text
+            cat_node.insert(num_ref_index, cat_ref)
+            cat_ref_type = "strRef"
+        logger.info(
             "Waterfall chart cache update: series %s category ref formula %s",
             series_label,
             f_node.text,
@@ -1221,6 +1280,10 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
         )
         category_rows = _range_values_from_worksheet(cat_ws, cat_ref_range)
         category_values = _flatten_cell_values(category_rows)
+        if _all_blank(category_values):
+            raise ValueError(
+                f"Chart cache: category range '{f_node.text}' for series '{series_label}' is blank."
+            )
         if not category_values and categories_values:
             category_values = categories_values
         category_values = ["" if value is None else str(value) for value in category_values]
@@ -1228,16 +1291,13 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
         if bounds:
             _, min_row, _, max_row = bounds
             series_category_bounds[idx] = (min_row, max_row, cat_sheet or cat_ws.title)
-        if cat_ref_type == "strRef":
-            str_cache = cat_ref.find("c:strCache", namespaces=nsmap)
-            if str_cache is None:
-                continue
-            _update_str_cache(str_cache, category_values)
-        else:
-            num_cache = cat_ref.find("c:numCache", namespaces=nsmap)
-            if num_cache is None:
-                continue
-            _update_num_cache(num_cache, category_values)
+        str_cache, created = _ensure_str_cache(cat_ref)
+        logger.info(
+            "Waterfall chart cache update: series %s category strCache %s",
+            series_label,
+            "created" if created else "existing",
+        )
+        _update_str_cache(str_cache, category_values)
         category_cache_updates += 1
         category_cache_count = len(category_values)
         logger.info(
@@ -1253,11 +1313,34 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
 
     label_cache_updates = 0
     label_cache_missing = 0
+    series_label_refs = []
     for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
         series_label = series_names[idx - 1] if idx - 1 < len(series_names) else f"Series {idx}"
         chart_series = chart.series[idx - 1] if idx - 1 < len(chart.series) else None
         label_refs = ser.findall(".//c:dLbls//c:dLbl//c:tx//c:strRef", namespaces=nsmap)
         label_refs += ser.findall(".//c:dLbls//c:tx//c:strRef", namespaces=nsmap)
+        series_label_refs.append((idx, series_label, chart_series, label_refs))
+    plot_level_refs = root.findall(
+        "c:plotArea//c:dLbls//c:tx//c:strRef", namespaces=nsmap
+    )
+    plot_only_refs = []
+    for ref_node in plot_level_refs:
+        current = ref_node.getparent()
+        has_series_ancestor = False
+        while current is not None:
+            if current.tag.endswith("ser"):
+                has_series_ancestor = True
+                break
+            current = current.getparent()
+        if not has_series_ancestor:
+            plot_only_refs.append(ref_node)
+    series_ref_count = sum(len(entry[3]) for entry in series_label_refs)
+    logger.info(
+        "Waterfall chart cache update: data label strRef nodes found (series=%s, plot-level=%s)",
+        series_ref_count,
+        len(plot_only_refs),
+    )
+    for idx, series_label, chart_series, label_refs in series_label_refs:
         seen_refs = set()
         deduped_refs = []
         for ref in label_refs:
@@ -1308,15 +1391,18 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
             )
             label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
             label_values = _flatten_cell_values(label_rows)
+            if _all_blank(label_values):
+                raise ValueError(
+                    f"Chart cache: data label range '{f_node.text}' for series '{series_label}' is blank."
+                )
             series_points = series_point_counts.get(idx, len(label_values))
             if len(label_values) < series_points:
                 label_values += ["" for _ in range(series_points - len(label_values))]
             elif len(label_values) > series_points:
                 label_values = label_values[:series_points]
-            str_cache = ref_node.find("c:strCache", namespaces=nsmap)
-            if str_cache is None:
+            str_cache, created = _ensure_str_cache(ref_node)
+            if created:
                 label_cache_missing += 1
-                continue
             _update_str_cache(
                 str_cache,
                 ["" if value is None else str(value) for value in label_values],
@@ -1333,6 +1419,54 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                     series_label,
                     expected_formula,
                 )
+            logger.info(
+                "Waterfall chart cache update: series %s data label formula %s cached %s points",
+                series_label,
+                f_node.text,
+                len(label_values),
+            )
+    for ref_node in plot_only_refs:
+        f_node = ref_node.find("c:f", namespaces=nsmap)
+        if f_node is None or not f_node.text:
+            logger.info(
+                "Waterfall chart cache update: plot-level data label ref formula missing",
+            )
+            continue
+        logger.info(
+            "Waterfall chart cache update: plot-level data label ref formula %s",
+            f_node.text,
+        )
+        label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
+            workbook, f_node.text
+        )
+        label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
+        label_values = _flatten_cell_values(label_rows)
+        if _all_blank(label_values):
+            raise ValueError(
+                f"Chart cache: plot-level data label range '{f_node.text}' is blank."
+            )
+        series_points = categories_count or len(label_values)
+        if len(label_values) < series_points:
+            label_values += ["" for _ in range(series_points - len(label_values))]
+        elif len(label_values) > series_points:
+            label_values = label_values[:series_points]
+        str_cache, created = _ensure_str_cache(ref_node)
+        if created:
+            label_cache_missing += 1
+        _update_str_cache(
+            str_cache,
+            ["" if value is None else str(value) for value in label_values],
+        )
+        label_cache_updates += 1
+        logger.info(
+            "Waterfall chart cache update: plot-level cached %s data label points",
+            len(label_values),
+        )
+        logger.info(
+            "Waterfall chart cache update: plot-level data label formula %s cached %s points",
+            f_node.text,
+            len(label_values),
+        )
     if label_cache_updates:
         logger.info(
             "Waterfall chart cache update: %s data label caches updated",
