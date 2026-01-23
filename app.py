@@ -42,6 +42,8 @@ PROJECT_TEMPLATES = {
     "MMM": TEMPLATE_DIR / "MMM.pptx",
 }
 DISPLAY_LABEL = {"Own": "Own", "Cross": "Competitor"}
+_NUM_CACHE_WARNING_LIMIT = 10
+_num_cache_warning_count = 0
 
 
 @dataclass(frozen=True)
@@ -938,6 +940,26 @@ def _range_values_from_worksheet(ws, ref: str) -> list[list]:
     return rows
 
 
+def _range_cells_from_worksheet(ws, ref: str) -> list[list]:
+    if not ref:
+        return []
+    normalized = str(ref)
+    if "!" in normalized:
+        _, normalized = normalized.split("!", 1)
+    normalized = normalized.replace("$", "")
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(normalized)
+    except ValueError:
+        return []
+    rows = []
+    for row_idx in range(min_row, max_row + 1):
+        row = []
+        for col_idx in range(min_col, max_col + 1):
+            row.append(ws.cell(row=row_idx, column=col_idx))
+        rows.append(row)
+    return rows
+
+
 def _flatten_cell_values(values: list[list]) -> list:
     if not values:
         return []
@@ -951,7 +973,76 @@ def _flatten_cell_values(values: list[list]) -> list:
     return flattened
 
 
-def _update_num_cache(num_cache, values: list[float]) -> None:
+def _log_num_cache_warning(
+    value,
+    fallback: float,
+    sheet_name: str | None,
+    cell_ref: str | None,
+) -> None:
+    global _num_cache_warning_count
+    if _num_cache_warning_count >= _NUM_CACHE_WARNING_LIMIT:
+        return
+    _num_cache_warning_count += 1
+    location = []
+    if sheet_name:
+        location.append(f"sheet={sheet_name}")
+    if cell_ref:
+        location.append(f"cell={cell_ref}")
+    location_text = f" ({', '.join(location)})" if location else ""
+    logger.warning(
+        "Chart cache: coerced non-numeric value%s %r to %s",
+        location_text,
+        value,
+        fallback,
+    )
+
+
+def safe_float(
+    value,
+    *,
+    sheet_name: str | None = None,
+    cell_ref: str | None = None,
+) -> float:
+    if value is None:
+        _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+        return 0.0
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+            return 0.0
+        if stripped.startswith("="):
+            _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+            return 0.0
+        normalized = stripped.replace(",", "")
+        if re.search(r"[A-Za-z]", normalized):
+            _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+            return 0.0
+        if not re.fullmatch(r"[+-]?(?:\d+(\.\d*)?|\.\d+)", normalized):
+            _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+            return 0.0
+        try:
+            return float(normalized)
+        except (TypeError, ValueError):
+            _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+            return 0.0
+    if isinstance(value, numbers.Real):
+        if pd.isna(value):
+            _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+            return 0.0
+        return float(value)
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+        return 0.0
+    if pd.isna(converted):
+        _log_num_cache_warning(value, 0.0, sheet_name, cell_ref)
+        return 0.0
+    return converted
+
+
+def _update_num_cache(num_cache, values: list) -> None:
     if num_cache is None:
         return
     pt_count = num_cache.find("c:ptCount", namespaces=_chart_namespace_map(num_cache))
@@ -964,6 +1055,15 @@ def _update_num_cache(num_cache, values: list[float]) -> None:
     for pt in list(num_cache.findall("c:pt", namespaces=_chart_namespace_map(num_cache))):
         num_cache.remove(pt)
     for idx, value in enumerate(values):
+        cell = value if hasattr(value, "value") and hasattr(value, "coordinate") else None
+        raw_value = value.value if cell is not None else value
+        sheet_name = cell.parent.title if cell is not None else None
+        cell_ref = cell.coordinate if cell is not None else None
+        normalized_value = safe_float(
+            raw_value,
+            sheet_name=sheet_name,
+            cell_ref=cell_ref,
+        )
         pt = etree.SubElement(
             num_cache,
             "{http://schemas.openxmlformats.org/drawingml/2006/chart}pt",
@@ -972,10 +1072,7 @@ def _update_num_cache(num_cache, values: list[float]) -> None:
         v = etree.SubElement(
             pt, "{http://schemas.openxmlformats.org/drawingml/2006/chart}v"
         )
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            v.text = ""
-        else:
-            v.text = str(float(value))
+        v.text = str(normalized_value)
 
 
 def _update_str_cache(str_cache, values: list[str]) -> None:
@@ -1018,7 +1115,7 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
         f_node = num_ref.find("c:f", namespaces=nsmap)
         if f_node is None or not f_node.text:
             continue
-        value_rows = _range_values_from_worksheet(ws, f_node.text)
+        value_rows = _range_cells_from_worksheet(ws, f_node.text)
         series_values = _flatten_cell_values(value_rows)
         num_cache = num_ref.find("c:numCache", namespaces=nsmap)
         _update_num_cache(num_cache, series_values)
@@ -2452,6 +2549,8 @@ def build_pptx_from_template(
     modelled_in_value: str | None = None,
     metric_value: str | None = None,
 ):
+    global _num_cache_warning_count
+    _num_cache_warning_count = 0
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
     slide1 = prs.slides[0]
