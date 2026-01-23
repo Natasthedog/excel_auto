@@ -137,6 +137,41 @@ def scope_df_from_contents(contents, filename):
     return scope_df
 
 
+def project_details_df_from_contents(contents, filename):
+    if not filename or not filename.lower().endswith((".xlsx", ".xlsb")):
+        raise ValueError("Scope file must be an Excel workbook (.xlsx or .xlsb).")
+
+    decoded = bytes_from_contents(contents)
+    read_options = {}
+    if filename.lower().endswith(".xlsb"):
+        read_options["engine"] = "pyxlsb"
+    try:
+        return pd.read_excel(
+            io.BytesIO(decoded),
+            sheet_name="Project Details",
+            header=None,
+            **read_options,
+        )
+    except ValueError:
+        return None
+
+
+def _project_detail_value_from_df(project_details_df: pd.DataFrame | None, label: str):
+    if project_details_df is None or project_details_df.empty or project_details_df.shape[1] < 2:
+        return None
+    target = label.strip().lower()
+    for _, row in project_details_df.iterrows():
+        cell_value = row.iloc[0]
+        if pd.isna(cell_value):
+            continue
+        if str(cell_value).strip().lower() == target:
+            raw_value = row.iloc[1]
+            if pd.isna(raw_value):
+                return ""
+            return str(raw_value).strip()
+    return None
+
+
 def product_description_df_from_contents(contents, filename):
     if not filename or not filename.lower().endswith((".xlsx", ".xlsb")):
         raise ValueError("Scope file must be an Excel workbook (.xlsx or .xlsb).")
@@ -1182,11 +1217,82 @@ def replace_text_in_slide_preserve_formatting(slide, old_text, new_text):
         if not shape.has_text_frame:
             continue
         for paragraph in shape.text_frame.paragraphs:
+            found_in_runs = False
             for run in paragraph.runs:
                 if old_text in run.text:
                     run.text = run.text.replace(old_text, new_text)
+                    found_in_runs = True
                     replaced = True
+            if found_in_runs or old_text not in paragraph.text:
+                continue
+            updated_text = paragraph.text.replace(old_text, new_text)
+            _rebuild_paragraph_runs(paragraph, updated_text)
+            replaced = True
     return replaced
+
+
+def _capture_run_formatting(run):
+    font = run.font
+    color = font.color
+    return {
+        "name": font.name,
+        "size": font.size,
+        "bold": font.bold,
+        "italic": font.italic,
+        "underline": font.underline,
+        "color_rgb": color.rgb if color is not None else None,
+    }
+
+
+def _apply_run_formatting(run, formatting):
+    font = run.font
+    font.name = formatting["name"]
+    font.size = formatting["size"]
+    font.bold = formatting["bold"]
+    font.italic = formatting["italic"]
+    font.underline = formatting["underline"]
+    if formatting["color_rgb"] is not None:
+        font.color.rgb = formatting["color_rgb"]
+
+
+def _rebuild_paragraph_runs(paragraph, new_text: str) -> None:
+    original_runs = list(paragraph.runs)
+    if not original_runs:
+        paragraph.text = new_text
+        return
+    formats = [_capture_run_formatting(run) for run in original_runs]
+    run_lengths = [len(run.text) for run in original_runs]
+    for run in original_runs:
+        paragraph._element.remove(run._r)
+    cursor = 0
+    for idx, fmt in enumerate(formats):
+        if idx == len(formats) - 1:
+            segment = new_text[cursor:]
+        else:
+            segment = new_text[cursor : cursor + run_lengths[idx]]
+        new_run = paragraph.add_run()
+        new_run.text = segment
+        _apply_run_formatting(new_run, fmt)
+        cursor += len(segment)
+
+
+def _update_waterfall_axis_placeholders(
+    slide,
+    modelled_in_value: str | None,
+    metric_value: str | None,
+) -> None:
+    if modelled_in_value:
+        replace_text_in_slide_preserve_formatting(slide, "<modelled in>", modelled_in_value)
+    else:
+        logger.warning(
+            "Missing/blank value for 'Sales will be modelled in:' in Project Details."
+        )
+    if metric_value:
+        replace_text_in_slide_preserve_formatting(slide, "<metric>", metric_value)
+    else:
+        logger.warning(
+            "Missing/blank value for 'Volume metric (unique per dataset):' in Project Details."
+        )
 
 
 def append_text_after_label(slide, label_text, appended_text):
@@ -1882,10 +1988,15 @@ def populate_category_waterfall(
     scope_df: pd.DataFrame | None = None,
     target_labels: list[str] | None = None,
     bucket_data: dict | None = None,
+    modelled_in_value: str | None = None,
+    metric_value: str | None = None,
 ):
     template_slide = _find_slide_by_marker(prs, "<Waterfall Template>")
     if template_slide is None:
         raise ValueError("Could not find the <Waterfall Template> slide in the template.")
+    _update_waterfall_axis_placeholders(
+        template_slide, modelled_in_value=modelled_in_value, metric_value=metric_value
+    )
     labels = target_labels or _target_level_labels_from_gathered_df(gathered_df)
     if not labels:
         return
@@ -1914,6 +2025,8 @@ def build_pptx_from_template(
     product_description_df=None,
     waterfall_targets=None,
     bucket_data=None,
+    modelled_in_value: str | None = None,
+    metric_value: str | None = None,
 ):
     prs = Presentation(io.BytesIO(template_bytes))
     # Assume Slide 1 has TitleBox & SubTitle
@@ -1992,6 +2105,8 @@ def build_pptx_from_template(
                 scope_df,
                 waterfall_targets,
                 bucket_data,
+                modelled_in_value,
+                metric_value,
             )
         except Exception:
             logger.exception("Failed to populate category waterfall slides.")
@@ -2501,6 +2616,9 @@ def generate_deck(
         df = df_from_contents(data_contents, data_name)
         scope_df = None
         product_description_df = None
+        project_details_df = None
+        modelled_in_value = None
+        metric_value = None
         if scope_contents:
             try:
                 scope_df = scope_df_from_contents(scope_contents, scope_name)
@@ -2512,6 +2630,19 @@ def generate_deck(
                 )
             except Exception:
                 product_description_df = None
+            try:
+                project_details_df = project_details_df_from_contents(
+                    scope_contents, scope_name
+                )
+            except Exception:
+                project_details_df = None
+        if project_details_df is not None:
+            modelled_in_value = _project_detail_value_from_df(
+                project_details_df, "Sales will be modelled in:"
+            )
+            metric_value = _project_detail_value_from_df(
+                project_details_df, "Volume metric (unique per dataset):"
+            )
         target_brand = target_brand_from_scope_df(scope_df)
         template_bytes = template_path.read_bytes()
 
@@ -2524,6 +2655,8 @@ def generate_deck(
             product_description_df,
             waterfall_targets,
             bucket_data,
+            modelled_in_value,
+            metric_value,
         )
         return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
 
