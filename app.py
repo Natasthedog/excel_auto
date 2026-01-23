@@ -584,19 +584,7 @@ def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
 def _target_level_labels_from_gathered_df(gathered_df: pd.DataFrame) -> list[str]:
     if gathered_df is None or gathered_df.empty:
         return []
-    label_col = _find_column_by_candidates(
-        gathered_df,
-        ["Target Level Label", "Target Level", "Target Label"],
-    )
-    data_start_idx = 0
-    if not label_col and len(gathered_df) > 0:
-        header_row = gathered_df.iloc[0]
-        label_col = _find_column_by_row_values(
-            header_row,
-            ["Target Level Label", "Target Level", "Target Label"],
-        )
-        if label_col:
-            data_start_idx = 1
+    label_col, data_start_idx = _target_level_label_column_exact(gathered_df)
     if not label_col:
         raise ValueError("The gatheredCN10 file is missing the Target Level Label column.")
     labels = (
@@ -2872,11 +2860,54 @@ def _add_waterfall_chart_from_template(
     return chart_shape
 
 
-def _set_waterfall_slide_header(slide, label: str) -> None:
+def _waterfall_template_marker(index: int) -> str:
+    if index < 0:
+        raise ValueError("Waterfall template index must be non-negative.")
+    if index == 0:
+        return "<Waterfall Template>"
+    return f"<Waterfall Template{index + 1}>"
+
+
+def _available_waterfall_template_slides(prs) -> list[tuple[str, object]]:
+    slides = []
+    idx = 0
+    while True:
+        marker = _waterfall_template_marker(idx)
+        slide = _find_slide_by_marker(prs, marker)
+        if slide is None:
+            break
+        slides.append((marker, slide))
+        idx += 1
+    return slides
+
+
+def _normalize_target_level_labels(labels: list[str] | None) -> list[str]:
+    unique_labels = []
+    seen = set()
+    for label in labels or []:
+        if label is None:
+            continue
+        value = str(label).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        unique_labels.append(value)
+    return unique_labels
+
+
+def _set_waterfall_slide_header(slide, label: str, marker_text: str | None = None) -> None:
     title_text = label
+    replaced = False
+    if marker_text:
+        replaced = replace_text_in_slide_preserve_formatting(slide, marker_text, title_text)
+        marker_plain = marker_text.strip("<>")
+        replaced = (
+            replace_text_in_slide_preserve_formatting(slide, marker_plain, title_text)
+            or replaced
+        )
     replaced = replace_text_in_slide_preserve_formatting(
         slide, "<Waterfall Template>", title_text
-    )
+    ) or replaced
     replaced = (
         replace_text_in_slide_preserve_formatting(slide, "Waterfall Template", title_text)
         or replaced
@@ -2973,39 +3004,42 @@ def populate_category_waterfall(
     modelled_in_value: str | None = None,
     metric_value: str | None = None,
 ):
-    template_slide = _find_slide_by_marker(prs, "<Waterfall Template>")
-    if template_slide is None:
-        raise ValueError("Could not find the <Waterfall Template> slide in the template.")
-    labels = target_labels or _target_level_labels_from_gathered_df(gathered_df)
-    target_level_label_value = labels[0] if labels else _resolve_target_level_label_value(
-        gathered_df,
-        target_labels,
-        bucket_data,
-    )
-    _update_waterfall_axis_placeholders(
-        prs,
-        template_slide,
-        target_level_label_value=target_level_label_value,
-        modelled_in_value=modelled_in_value,
-        metric_value=metric_value,
-    )
+    labels = _normalize_target_level_labels(target_labels)
+    if not labels:
+        labels = _target_level_labels_from_gathered_df_with_filters(
+            gathered_df,
+            year1=bucket_data.get("year1") if bucket_data else None,
+            year2=bucket_data.get("year2") if bucket_data else None,
+            target_labels=bucket_data.get("target_labels") if bucket_data else None,
+        )
     if not labels:
         return
-    first_slide = template_slide
-    _update_waterfall_chart(first_slide, scope_df, gathered_df, labels[0], bucket_data)
-    _set_waterfall_slide_header(first_slide, labels[0])
-    for label in labels[1:]:
-        new_slide = prs.slides.add_slide(template_slide.slide_layout)
-        _add_waterfall_chart_from_template(
-            new_slide,
-            template_slide,
-            scope_df,
-            gathered_df,
-            label,
-            bucket_data,
-            "Waterfall Template",
+
+    available_slides = _available_waterfall_template_slides(prs)
+    available_count = len(available_slides)
+    if available_count == 0:
+        raise ValueError("Could not find the <Waterfall Template> slide in the template.")
+    if len(labels) > available_count:
+        raise ValueError(
+            "Need {needed} waterfall slides but only found {available} "
+            "(<Waterfall Template>...<Waterfall Template{available}>) in template. "
+            "Please add more duplicated template slides or use a larger template deck.".format(
+                needed=len(labels),
+                available=available_count,
+            )
         )
-        _set_waterfall_slide_header(new_slide, label)
+
+    for idx, label in enumerate(labels):
+        marker_text, slide = available_slides[idx]
+        _update_waterfall_axis_placeholders(
+            prs,
+            slide,
+            target_level_label_value=label,
+            modelled_in_value=modelled_in_value,
+            metric_value=metric_value,
+        )
+        _update_waterfall_chart(slide, scope_df, gathered_df, label, bucket_data)
+        _set_waterfall_slide_header(slide, label, marker_text=marker_text)
 
 def build_pptx_from_template(
     template_bytes,
