@@ -8,7 +8,18 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
-from dash import Dash, html, dcc, Input, Output, State, callback, no_update, ALL
+from dash import (
+    Dash,
+    html,
+    dcc,
+    Input,
+    Output,
+    State,
+    callback,
+    no_update,
+    ALL,
+    callback_context,
+)
 from openpyxl import load_workbook
 import numbers
 from pptx import Presentation
@@ -751,7 +762,7 @@ def _compute_bucket_deltas(
         ]
         target_labels = config.get("target_labels")
         if target_labels is None:
-            target_labels = ["Own", "Cross"]
+            target_labels = []
         if not target_labels:
             continue
         ordered_targets = []
@@ -2508,6 +2519,28 @@ app.layout = html.Div(
                     ],
                     style={"marginBottom": "12px"},
                 ),
+                html.Div(
+                    [
+                        html.Button(
+                            "Select all buckets",
+                            id="bucket-select-all",
+                            n_clicks=0,
+                            style={"padding": "6px 12px", "borderRadius": "8px"},
+                        ),
+                        html.Button(
+                            "Clear all buckets",
+                            id="bucket-clear-all",
+                            n_clicks=0,
+                            style={"padding": "6px 12px", "borderRadius": "8px"},
+                        ),
+                    ],
+                    style={
+                        "display": "flex",
+                        "gap": "8px",
+                        "marginBottom": "12px",
+                        "flexWrap": "wrap",
+                    },
+                ),
                 html.Div(id="bucket-group-controls"),
                 html.Button(
                     "Apply Buckets to Waterfall",
@@ -2694,7 +2727,7 @@ def populate_bucket_controls(contents, filename):
                             {"label": "Own", "value": "Own"},
                             {"label": "Cross", "value": "Cross"},
                         ],
-                        value=["Own", "Cross"],
+                        value=[],
                         labelStyle={"display": "block", "marginBottom": "2px"},
                         inputStyle={"marginRight": "6px"},
                         style={"minWidth": "120px", "marginBottom": "8px"},
@@ -2724,6 +2757,24 @@ def populate_bucket_controls(contents, filename):
         group_controls,
         status,
     )
+
+
+@callback(
+    Output({"type": "bucket-group-type", "group": ALL}, "value"),
+    Input("bucket-select-all", "n_clicks"),
+    Input("bucket-clear-all", "n_clicks"),
+    State({"type": "bucket-group-type", "group": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def update_bucket_group_types(select_all_clicks, clear_all_clicks, bucket_type_ids):
+    if not bucket_type_ids:
+        return []
+    triggered = callback_context.triggered[0]["prop_id"].split(".")[0]
+    if triggered == "bucket-clear-all":
+        return [[] for _ in bucket_type_ids]
+    if triggered == "bucket-select-all":
+        return [["Own", "Cross"] for _ in bucket_type_ids]
+    return no_update
 
 
 @callback(
@@ -2783,9 +2834,6 @@ def apply_bucket_selection(
         if column_id and selection:
             selected_columns.append(column_id)
 
-    if not selected_columns:
-        return no_update, no_update, "Select at least one bucket column before applying."
-
     column_groups = metadata.get("column_groups", {}) if metadata else {}
     group_columns: dict[str, list[str]] = {}
     for column_id in selected_columns:
@@ -2793,24 +2841,16 @@ def apply_bucket_selection(
         if group:
             group_columns.setdefault(group, []).append(column_id)
 
-    if not group_columns:
-        return no_update, no_update, "Select at least one bucket column before applying."
-
     bucket_config: dict[str, dict[str, list[str]]] = {}
     for group in metadata.get("group_order", []):
         selected_group_columns = group_columns.get(group, [])
-        if not selected_group_columns:
-            continue
         target_labels = bucket_type_map.get(group)
         if target_labels is None:
-            target_labels = ["Own", "Cross"]
+            target_labels = []
         bucket_config[group] = {
             "target_labels": target_labels,
             "subheaders_included": selected_group_columns,
         }
-
-    if not bucket_config:
-        return no_update, no_update, "Select at least one bucket column before applying."
 
     try:
         deltas = _compute_bucket_deltas(
