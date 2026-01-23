@@ -1327,8 +1327,156 @@ def _rebuild_paragraph_runs(paragraph, new_text: str) -> None:
         cursor += len(segment)
 
 
+def _shape_text_snippet(shape) -> str:
+    if not shape.has_text_frame:
+        return ""
+    text = shape.text_frame.text or ""
+    compact = " ".join(text.split())
+    return compact[:80]
+
+
+def _slide_title(slide) -> str:
+    try:
+        title_shape = slide.shapes.title
+    except Exception:
+        title_shape = None
+    if title_shape is not None and title_shape.has_text_frame:
+        title_text = title_shape.text_frame.text or ""
+        return title_text.strip()
+    return ""
+
+
+def _slide_index(prs, target_slide) -> int | None:
+    for idx, slide in enumerate(prs.slides, start=1):
+        if slide is target_slide:
+            return idx
+    return None
+
+
+def _slides_with_placeholder(prs, placeholder: str) -> list[int]:
+    matches: list[int] = []
+    for idx, slide in enumerate(prs.slides, start=1):
+        found = False
+        for shape in slide.shapes:
+            if shape.has_text_frame and placeholder in (shape.text_frame.text or ""):
+                found = True
+                break
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        if placeholder in (cell.text_frame.text or ""):
+                            found = True
+                            break
+                    if found:
+                        break
+            if found:
+                break
+        if found:
+            matches.append(idx)
+    return matches
+
+
+def _replace_placeholders_in_text_frame(text_frame, replacements, counts) -> None:
+    for paragraph in text_frame.paragraphs:
+        for placeholder, replacement in replacements.items():
+            paragraph_text = paragraph.text or ""
+            occurrences = paragraph_text.count(placeholder)
+            if occurrences == 0:
+                continue
+            counts[placeholder]["found"] += occurrences
+            if replacement is None:
+                continue
+            if paragraph.runs:
+                if _replace_placeholder_in_paragraph_runs(paragraph, placeholder, replacement):
+                    counts[placeholder]["replaced"] += occurrences
+            else:
+                paragraph.text = paragraph_text.replace(placeholder, replacement)
+                counts[placeholder]["replaced"] += occurrences
+
+
+def replace_placeholders_strict(prs, slide_selector, replacements: dict[str, str | None]) -> None:
+    if slide_selector is None:
+        raise ValueError("Slide selector is required to replace placeholders.")
+    if isinstance(slide_selector, str):
+        slide = _find_slide_by_marker(prs, slide_selector)
+    else:
+        slide = slide_selector
+    if slide is None:
+        raise ValueError(f"Could not resolve slide selector: {slide_selector}")
+
+    counts = {
+        placeholder: {"found": 0, "replaced": 0} for placeholder in replacements
+    }
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            _replace_placeholders_in_text_frame(shape.text_frame, replacements, counts)
+        if shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    _replace_placeholders_in_text_frame(
+                        cell.text_frame, replacements, counts
+                    )
+
+    slide_idx = _slide_index(prs, slide)
+    slide_title = _slide_title(slide)
+    slide_name = getattr(slide, "name", None) or ""
+    shape_lines = []
+    for shape in slide.shapes:
+        shape_lines.append(
+            " - "
+            f"id={getattr(shape, 'shape_id', None)} "
+            f"name={getattr(shape, 'name', None)!r} "
+            f"type={getattr(shape, 'shape_type', None)} "
+            f"has_text_frame={shape.has_text_frame} "
+            f"has_table={shape.has_table} "
+            f"text={_shape_text_snippet(shape)!r}"
+        )
+    counts_lines = [
+        f" - {placeholder}: found={stats['found']} replaced={stats['replaced']}"
+        for placeholder, stats in counts.items()
+    ]
+
+    def build_diagnostics(missing_placeholder: str) -> str:
+        locations = _slides_with_placeholder(prs, missing_placeholder)
+        location_line = (
+            f"Slides containing {missing_placeholder}: {locations}"
+            if locations
+            else f"Slides containing {missing_placeholder}: []"
+        )
+        return "\n".join(
+            [
+                "Placeholder replacement diagnostics:",
+                f"Slide index: {slide_idx}",
+                f"Slide name: {slide_name}",
+                f"Slide title: {slide_title}",
+                "Shape inventory:",
+                *shape_lines,
+                "Replacement counts:",
+                *counts_lines,
+                location_line,
+            ]
+        )
+
+    for placeholder in replacements:
+        if counts[placeholder]["found"] > 0:
+            continue
+        locations = _slides_with_placeholder(prs, placeholder)
+        if not locations:
+            raise ValueError(
+                f"Placeholder {placeholder} not found in deck\n"
+                f"{build_diagnostics(placeholder)}"
+            )
+        intended_idx = slide_idx if slide_idx is not None else "unknown"
+        raise ValueError(
+            f"Placeholder {placeholder} found on slide {locations[0]} "
+            f"not on Waterfall slide {intended_idx}\n"
+            f"{build_diagnostics(placeholder)}"
+        )
+
+
 def _update_waterfall_axis_placeholders(
-    slide,
+    prs,
+    slide_selector,
     modelled_in_value: str | None,
     metric_value: str | None,
 ) -> None:
@@ -1336,7 +1484,7 @@ def _update_waterfall_axis_placeholders(
         "<modelled in>": modelled_in_value,
         "<metric>": metric_value,
     }
-    _replace_placeholders_in_slide_runs(slide, replacements)
+    replace_placeholders_strict(prs, slide_selector, replacements)
     if not modelled_in_value:
         logger.warning(
             "Missing/blank value for 'Sales will be modelled in:' in Project Details."
@@ -2047,7 +2195,10 @@ def populate_category_waterfall(
     if template_slide is None:
         raise ValueError("Could not find the <Waterfall Template> slide in the template.")
     _update_waterfall_axis_placeholders(
-        template_slide, modelled_in_value=modelled_in_value, metric_value=metric_value
+        prs,
+        template_slide,
+        modelled_in_value=modelled_in_value,
+        metric_value=metric_value,
     )
     labels = target_labels or _target_level_labels_from_gathered_df(gathered_df)
     if not labels:
