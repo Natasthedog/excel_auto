@@ -6,6 +6,7 @@ from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+import re
 
 import pandas as pd
 from dash import (
@@ -21,12 +22,14 @@ from dash import (
     callback_context,
 )
 from openpyxl import load_workbook
+from openpyxl.utils import range_boundaries
 import numbers
 from pptx import Presentation
 from pptx.util import Inches
 from pptx.enum.text import PP_ALIGN
 from pptx.chart.data import ChartData
 from pptx.enum.chart import XL_CHART_TYPE
+from lxml import etree
 
 app = Dash(__name__)
 app.title = "Deck Automator (MVP)"
@@ -905,6 +908,159 @@ def _save_chart_workbook(chart, workbook) -> None:
     stream = io.BytesIO()
     workbook.save(stream)
     chart.part.chart_workbook.xlsx_part.blob = stream.getvalue()
+
+
+def _chart_namespace_map(root) -> dict:
+    nsmap = {"c": "http://schemas.openxmlformats.org/drawingml/2006/chart"}
+    for prefix, uri in (root.nsmap or {}).items():
+        if prefix and uri:
+            nsmap[prefix] = uri
+    return nsmap
+
+
+def _range_values_from_worksheet(ws, ref: str) -> list[list]:
+    if not ref:
+        return []
+    normalized = str(ref)
+    if "!" in normalized:
+        _, normalized = normalized.split("!", 1)
+    normalized = normalized.replace("$", "")
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(normalized)
+    except ValueError:
+        return []
+    rows = []
+    for row_idx in range(min_row, max_row + 1):
+        row = []
+        for col_idx in range(min_col, max_col + 1):
+            row.append(ws.cell(row=row_idx, column=col_idx).value)
+        rows.append(row)
+    return rows
+
+
+def _flatten_cell_values(values: list[list]) -> list:
+    if not values:
+        return []
+    if len(values) == 1:
+        return list(values[0])
+    if all(len(row) == 1 for row in values):
+        return [row[0] for row in values]
+    flattened = []
+    for row in values:
+        flattened.extend(row)
+    return flattened
+
+
+def _update_num_cache(num_cache, values: list[float]) -> None:
+    if num_cache is None:
+        return
+    pt_count = num_cache.find("c:ptCount", namespaces=_chart_namespace_map(num_cache))
+    if pt_count is None:
+        pt_count = etree.SubElement(
+            num_cache,
+            "{http://schemas.openxmlformats.org/drawingml/2006/chart}ptCount",
+        )
+    pt_count.set("val", str(len(values)))
+    for pt in list(num_cache.findall("c:pt", namespaces=_chart_namespace_map(num_cache))):
+        num_cache.remove(pt)
+    for idx, value in enumerate(values):
+        pt = etree.SubElement(
+            num_cache,
+            "{http://schemas.openxmlformats.org/drawingml/2006/chart}pt",
+            idx=str(idx),
+        )
+        v = etree.SubElement(
+            pt, "{http://schemas.openxmlformats.org/drawingml/2006/chart}v"
+        )
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            v.text = ""
+        else:
+            v.text = str(float(value))
+
+
+def _update_str_cache(str_cache, values: list[str]) -> None:
+    if str_cache is None:
+        return
+    pt_count = str_cache.find("c:ptCount", namespaces=_chart_namespace_map(str_cache))
+    if pt_count is None:
+        pt_count = etree.SubElement(
+            str_cache,
+            "{http://schemas.openxmlformats.org/drawingml/2006/chart}ptCount",
+        )
+    pt_count.set("val", str(len(values)))
+    for pt in list(str_cache.findall("c:pt", namespaces=_chart_namespace_map(str_cache))):
+        str_cache.remove(pt)
+    for idx, value in enumerate(values):
+        pt = etree.SubElement(
+            str_cache,
+            "{http://schemas.openxmlformats.org/drawingml/2006/chart}pt",
+            idx=str(idx),
+        )
+        v = etree.SubElement(
+            pt, "{http://schemas.openxmlformats.org/drawingml/2006/chart}v"
+        )
+        v.text = "" if value is None else str(value)
+
+
+def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> None:
+    chart_part = chart.part
+    root = chart_part._element
+    nsmap = _chart_namespace_map(root)
+    ws = workbook.active
+    categories_values = ["" if value is None else str(value) for value in categories]
+    categories_count = len(categories_values)
+    logger.info("Waterfall chart cache update: %s category points", categories_count)
+
+    for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
+        num_ref = ser.find("c:val/c:numRef", namespaces=nsmap)
+        if num_ref is None:
+            continue
+        f_node = num_ref.find("c:f", namespaces=nsmap)
+        if f_node is None or not f_node.text:
+            continue
+        value_rows = _range_values_from_worksheet(ws, f_node.text)
+        series_values = _flatten_cell_values(value_rows)
+        num_cache = num_ref.find("c:numCache", namespaces=nsmap)
+        _update_num_cache(num_cache, series_values)
+        logger.info(
+            "Waterfall chart cache update: series %s cached %s points",
+            idx,
+            len(series_values),
+        )
+
+    updated_categories = False
+    for cat_ref in root.findall(".//c:cat/c:strRef", namespaces=nsmap):
+        str_cache = cat_ref.find("c:strCache", namespaces=nsmap)
+        if str_cache is None:
+            continue
+        _update_str_cache(str_cache, categories_values)
+        updated_categories = True
+    if updated_categories:
+        logger.info("Waterfall chart cache update: %s category cache points", categories_count)
+
+    label_cache_updates = 0
+    label_cache_missing = 0
+    for ref_node in root.findall(".//c:dLbls//c:tx/c:strRef", namespaces=nsmap):
+        f_node = ref_node.find("c:f", namespaces=nsmap)
+        if f_node is None or not f_node.text:
+            continue
+        label_rows = _range_values_from_worksheet(ws, f_node.text)
+        label_values = _flatten_cell_values(label_rows)
+        str_cache = ref_node.find("c:strCache", namespaces=nsmap)
+        if str_cache is None:
+            label_cache_missing += 1
+            continue
+        _update_str_cache(str_cache, ["" if value is None else str(value) for value in label_values])
+        label_cache_updates += 1
+    if label_cache_updates:
+        logger.info(
+            "Waterfall chart cache update: %s data label caches updated",
+            label_cache_updates,
+        )
+    elif label_cache_missing:
+        logger.info(
+            "Waterfall chart cache update: chart is not using value-from-cells labels",
+        )
 
 
 def _capture_label_columns(ws, series_names: list[str]) -> dict[int, dict[str, list]]:
@@ -2188,6 +2344,7 @@ def _add_waterfall_chart_from_template(
     _ensure_negatives_column_positive(updated_wb.active)
     _update_waterfall_positive_negative_labels(updated_wb.active)
     _save_chart_workbook(chart_shape.chart, updated_wb)
+    _update_waterfall_chart_caches(chart_shape.chart, updated_wb, categories)
     _update_waterfall_yoy_arrows(slide, base_values)
     return chart_shape
 
@@ -2242,6 +2399,7 @@ def _update_waterfall_chart(
     _ensure_negatives_column_positive(updated_wb.active)
     _update_waterfall_positive_negative_labels(updated_wb.active)
     _save_chart_workbook(chart, updated_wb)
+    _update_waterfall_chart_caches(chart, updated_wb, categories)
     _update_waterfall_yoy_arrows(slide, base_values)
 
 
