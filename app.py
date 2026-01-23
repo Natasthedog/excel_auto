@@ -2,6 +2,7 @@
 import io
 import base64
 import logging
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -156,20 +157,68 @@ def project_details_df_from_contents(contents, filename):
         return None
 
 
-def _project_detail_value_from_df(project_details_df: pd.DataFrame | None, label: str):
+def _normalize_project_details_label(text: object) -> str:
+    if pd.isna(text):
+        return ""
+    normalized = str(text).strip().lower()
+    normalized = " ".join(normalized.split())
+    normalized = normalized.rstrip(" :;,.!?")
+    return normalized
+
+
+def _project_detail_value_from_df(
+    project_details_df: pd.DataFrame | None,
+    label_key: str,
+    synonyms: list[str],
+    canonical: str,
+):
     if project_details_df is None or project_details_df.empty or project_details_df.shape[1] < 2:
         return None
-    target = label.strip().lower()
-    for _, row in project_details_df.iterrows():
+
+    synonym_matches = []
+    normalized_synonyms = {_normalize_project_details_label(item) for item in synonyms}
+    for row_idx, row in project_details_df.iterrows():
         cell_value = row.iloc[0]
-        if pd.isna(cell_value):
+        normalized_cell = _normalize_project_details_label(cell_value)
+        if not normalized_cell:
             continue
-        if str(cell_value).strip().lower() == target:
-            raw_value = row.iloc[1]
-            if pd.isna(raw_value):
-                return ""
-            return str(raw_value).strip()
-    return None
+        if normalized_cell in normalized_synonyms:
+            synonym_matches.append((row_idx, cell_value, normalized_cell, 1.0))
+
+    if synonym_matches:
+        candidates = synonym_matches
+    else:
+        candidates = []
+        canonical_norm = _normalize_project_details_label(canonical)
+        for row_idx, row in project_details_df.iterrows():
+            cell_value = row.iloc[0]
+            normalized_cell = _normalize_project_details_label(cell_value)
+            if not normalized_cell:
+                continue
+            score = SequenceMatcher(None, normalized_cell, canonical_norm).ratio()
+            if score >= 0.85:
+                candidates.append((row_idx, cell_value, normalized_cell, score))
+
+    if not candidates:
+        raise ValueError(f"Could not find Project Details label for {label_key}")
+
+    candidates.sort(key=lambda item: item[3], reverse=True)
+    if len(candidates) > 1 and candidates[1][3] >= candidates[0][3] - 0.03:
+        details = ", ".join(
+            f"{str(item[1]).strip()} ({item[3]:.2f})" for item in candidates
+        )
+        raise ValueError(
+            f"Ambiguous Project Details label for {label_key}. Candidates: {details}"
+        )
+
+    row_idx, original_label, _, _ = candidates[0]
+    logger.info(
+        "Matched Project Details label for %s: %s", label_key, str(original_label)
+    )
+    raw_value = project_details_df.iloc[row_idx, 1]
+    if pd.isna(raw_value):
+        return ""
+    return str(raw_value).strip()
 
 
 def product_description_df_from_contents(contents, filename):
@@ -2841,10 +2890,25 @@ def generate_deck(
                 project_details_df = None
         if project_details_df is not None:
             modelled_in_value = _project_detail_value_from_df(
-                project_details_df, "Sales will be modelled in:"
+                project_details_df,
+                "modelled in",
+                [
+                    "Sales will be modelled in",
+                    "Sales will be modeled in",
+                    "Sales modelled in",
+                    "Sales modeled in",
+                ],
+                "Sales will be modelled in",
             )
             metric_value = _project_detail_value_from_df(
-                project_details_df, "Volume metric (unique per dataset):"
+                project_details_df,
+                "metric",
+                [
+                    "Volume metric (unique per dataset)",
+                    "Volume metric unique per dataset",
+                    "Volume metric",
+                ],
+                "Volume metric (unique per dataset)",
             )
         target_brand = target_brand_from_scope_df(scope_df)
         template_bytes = template_path.read_bytes()
