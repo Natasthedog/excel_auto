@@ -614,6 +614,78 @@ def _target_level_labels_from_gathered_df(gathered_df: pd.DataFrame) -> list[str
         unique_labels.append(label)
     return unique_labels
 
+
+def _target_level_label_column_exact(gathered_df: pd.DataFrame) -> tuple[str | None, int]:
+    if gathered_df is None or gathered_df.empty:
+        return None, 0
+    if "Target Level Label" in gathered_df.columns:
+        return "Target Level Label", 0
+    header_row = gathered_df.iloc[0]
+    for column, value in header_row.items():
+        if pd.isna(value):
+            continue
+        if str(value).strip() == "Target Level Label":
+            return column, 1
+    return None, 0
+
+
+def _target_level_labels_from_gathered_df_with_filters(
+    gathered_df: pd.DataFrame,
+    year1: str | None = None,
+    year2: str | None = None,
+    target_labels: list[str] | None = None,
+) -> list[str]:
+    if gathered_df is None or gathered_df.empty:
+        return []
+    label_col, data_start_idx = _target_level_label_column_exact(gathered_df)
+    if not label_col:
+        raise ValueError("The gatheredCN10 file is missing the Target Level Label column.")
+    data_df = gathered_df.iloc[data_start_idx:]
+    filtered_df = data_df
+
+    year_col = _find_column_by_candidates(gathered_df, ["Year", "Model Year"])
+    if year_col and (year1 is not None or year2 is not None):
+        normalized_years = {
+            _normalize_text_value(value)
+            for value in (year1, year2)
+            if value is not None
+        }
+        if normalized_years:
+            year_series = data_df[year_col].map(_normalize_text_value)
+            filtered_df = filtered_df[year_series.isin(normalized_years)]
+
+    target_label_col = _find_column_by_candidates(
+        gathered_df, ["Target Label", "Target", "Target Type"]
+    )
+    normalized_targets: set[str] = set()
+    for label in target_labels or []:
+        normalized = _normalize_text_value(label)
+        if not normalized:
+            continue
+        normalized_targets.add(normalized)
+        if normalized == "cross":
+            normalized_targets.add("competitor")
+        if normalized == "competitor":
+            normalized_targets.add("cross")
+    if target_label_col and normalized_targets:
+        target_series = data_df[target_label_col].map(_normalize_text_value)
+        filtered_df = filtered_df[target_series.isin(normalized_targets)]
+
+    labels = (
+        filtered_df[label_col]
+        .dropna()
+        .astype(str)
+        .map(str.strip)
+    )
+    unique_labels = []
+    seen = set()
+    for label in labels:
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        unique_labels.append(label)
+    return unique_labels
+
 def _normalize_text_value(value) -> str:
     if pd.isna(value):
         return ""
@@ -2115,10 +2187,12 @@ def replace_placeholders_strict(prs, slide_selector, replacements: dict[str, str
 def _update_waterfall_axis_placeholders(
     prs,
     slide_selector,
+    target_level_label_value: str | None,
     modelled_in_value: str | None,
     metric_value: str | None,
 ) -> None:
     replacements = {
+        "<Target Level Label>": target_level_label_value,
         "<modelled in>": modelled_in_value,
         "<metric>": metric_value,
     }
@@ -2822,6 +2896,44 @@ def _update_waterfall_chart(
     _update_waterfall_yoy_arrows(slide, base_values)
 
 
+def _resolve_target_level_label_value(
+    gathered_df: pd.DataFrame | None,
+    waterfall_targets: list[str] | None,
+    bucket_data: dict | None,
+) -> str | None:
+    selected = [label for label in (waterfall_targets or []) if label and str(label).strip()]
+    if selected:
+        if len(selected) > 1:
+            joined = ", ".join(str(label).strip() for label in selected)
+            logger.info(
+                "Multiple Target Level Label values selected; using joined string: %s",
+                joined,
+            )
+            return joined
+        return str(selected[0]).strip()
+    if gathered_df is None or gathered_df.empty:
+        return None
+    year1 = bucket_data.get("year1") if bucket_data else None
+    year2 = bucket_data.get("year2") if bucket_data else None
+    target_labels = bucket_data.get("target_labels") if bucket_data else None
+    labels = _target_level_labels_from_gathered_df_with_filters(
+        gathered_df,
+        year1=year1,
+        year2=year2,
+        target_labels=target_labels,
+    )
+    if not labels:
+        return None
+    if len(labels) > 1:
+        joined = ", ".join(labels)
+        logger.info(
+            "Multiple Target Level Label values derived from gatheredCN10; using joined string: %s",
+            joined,
+        )
+        return joined
+    return labels[0]
+
+
 def populate_category_waterfall(
     prs,
     gathered_df: pd.DataFrame,
@@ -2834,9 +2946,15 @@ def populate_category_waterfall(
     template_slide = _find_slide_by_marker(prs, "<Waterfall Template>")
     if template_slide is None:
         raise ValueError("Could not find the <Waterfall Template> slide in the template.")
+    target_level_label_value = _resolve_target_level_label_value(
+        gathered_df,
+        target_labels,
+        bucket_data,
+    )
     _update_waterfall_axis_placeholders(
         prs,
         template_slide,
+        target_level_label_value=target_level_label_value,
         modelled_in_value=modelled_in_value,
         metric_value=metric_value,
     )
@@ -3447,12 +3565,21 @@ def apply_bucket_selection(
 
     labels = [group for group, _ in deltas]
     values = [value for _, value in deltas]
+    selected_target_labels = []
+    seen_target_labels = set()
+    for config in bucket_config.values():
+        for label in config.get("target_labels", []):
+            if not label or label in seen_target_labels:
+                continue
+            seen_target_labels.add(label)
+            selected_target_labels.append(label)
 
     bucket_data = {
         "labels": labels,
         "values": values,
         "year1": year1,
         "year2": year2,
+        "target_labels": selected_target_labels,
     }
     return bucket_config, bucket_data, f"Applied {len(values)} bucket delta(s) to the waterfall."
 
