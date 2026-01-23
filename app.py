@@ -917,6 +917,106 @@ def _ensure_negatives_column_positive(ws) -> None:
                 negatives_cell.value = f"=ABS({formula})"
 
 
+def _find_header_column(ws, candidates: list[str]) -> int | None:
+    normalized_columns = {}
+    for col_idx in range(1, ws.max_column + 1):
+        value = ws.cell(row=1, column=col_idx).value
+        if value is None:
+            continue
+        normalized_columns[_normalize_column_name(str(value))] = col_idx
+    candidate_normalized = [_normalize_column_name(candidate) for candidate in candidates]
+    for candidate in candidate_normalized:
+        if candidate in normalized_columns:
+            return normalized_columns[candidate]
+    for column_key, col_idx in normalized_columns.items():
+        for candidate in candidate_normalized:
+            if candidate in column_key or column_key in candidate:
+                return col_idx
+    from difflib import get_close_matches
+
+    matches = get_close_matches(
+        " ".join(candidate_normalized),
+        list(normalized_columns.keys()),
+        n=1,
+        cutoff=0.75,
+    )
+    if matches:
+        return normalized_columns[matches[0]]
+    return None
+
+
+def _numeric_cell_value(cell) -> float | None:
+    value = cell.value
+    if value is None:
+        return None
+    if isinstance(value, numbers.Number) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("="):
+            cached_value = cell.internal_value
+            if isinstance(cached_value, numbers.Number) and not isinstance(cached_value, bool):
+                return float(cached_value)
+            cached_value = getattr(cell, "_value", None)
+            if isinstance(cached_value, numbers.Number) and not isinstance(cached_value, bool):
+                return float(cached_value)
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _format_waterfall_label(value: float, sign: str) -> str:
+    abs_value = abs(value)
+    if abs_value >= 1_000_000:
+        scaled = abs_value / 1_000_000
+        suffix = "m"
+    elif abs_value >= 1_000:
+        scaled = abs_value / 1_000
+        suffix = "k"
+    else:
+        scaled = abs_value
+        suffix = ""
+    return f"{sign}{scaled:.1f}{suffix}"
+
+
+def _update_waterfall_positive_negative_labels(ws) -> None:
+    positives_col = _find_header_column(ws, ["Positives"])
+    negatives_col = _find_header_column(ws, ["Negatives"])
+    labs_positives_col = _find_header_column(ws, ["labs-Positives"])
+    labs_negatives_col = _find_header_column(ws, ["labs-Negatives"])
+    if not positives_col and not negatives_col:
+        return
+    if not labs_positives_col and not labs_negatives_col:
+        return
+
+    for row_idx in range(2, ws.max_row + 1):
+        if labs_positives_col:
+            pos_value = (
+                _numeric_cell_value(ws.cell(row=row_idx, column=positives_col))
+                if positives_col
+                else None
+            )
+            labs_cell = ws.cell(row=row_idx, column=labs_positives_col)
+            if pos_value is None or pos_value == 0:
+                labs_cell.value = None
+            else:
+                labs_cell.value = _format_waterfall_label(pos_value, "+")
+        if labs_negatives_col:
+            neg_value = (
+                _numeric_cell_value(ws.cell(row=row_idx, column=negatives_col))
+                if negatives_col
+                else None
+            )
+            labs_cell = ws.cell(row=row_idx, column=labs_negatives_col)
+            if neg_value is None or neg_value == 0:
+                labs_cell.value = None
+            else:
+                labs_cell.value = _format_waterfall_label(neg_value, "-")
+
+
 def _format_yoy_change_text(value: float) -> str:
     if value is None or pd.isna(value):
         return "0%"
@@ -1717,6 +1817,7 @@ def _add_waterfall_chart_from_template(
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
     _ensure_negatives_column_positive(updated_wb.active)
+    _update_waterfall_positive_negative_labels(updated_wb.active)
     _save_chart_workbook(chart_shape.chart, updated_wb)
     _update_waterfall_yoy_arrows(slide, base_values)
     return chart_shape
@@ -1770,6 +1871,7 @@ def _update_waterfall_chart(
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
     _ensure_negatives_column_positive(updated_wb.active)
+    _update_waterfall_positive_negative_labels(updated_wb.active)
     _save_chart_workbook(chart, updated_wb)
     _update_waterfall_yoy_arrows(slide, base_values)
 
