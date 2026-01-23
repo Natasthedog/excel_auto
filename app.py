@@ -1231,6 +1231,57 @@ def replace_text_in_slide_preserve_formatting(slide, old_text, new_text):
     return replaced
 
 
+def _replace_placeholder_in_paragraph_runs(paragraph, placeholder: str, replacement: str) -> bool:
+    if not replacement:
+        return False
+    runs = list(paragraph.runs)
+    if not runs:
+        return False
+    replaced = False
+    while True:
+        full_text = "".join(run.text for run in runs)
+        start_idx = full_text.find(placeholder)
+        if start_idx == -1:
+            break
+        end_idx = start_idx + len(placeholder)
+        replaced = True
+        first_overlap = True
+        cumulative = 0
+        for run in runs:
+            run_text = run.text
+            run_start = cumulative
+            run_end = cumulative + len(run_text)
+            cumulative = run_end
+            if run_end <= start_idx or run_start >= end_idx:
+                continue
+            overlap_start = max(start_idx, run_start)
+            overlap_end = min(end_idx, run_end)
+            local_start = overlap_start - run_start
+            local_end = overlap_end - run_start
+            if first_overlap:
+                run.text = run_text[:local_start] + replacement + run_text[local_end:]
+                first_overlap = False
+            else:
+                run.text = run_text[:local_start] + run_text[local_end:]
+    return replaced
+
+
+def _replace_placeholders_in_slide_runs(
+    slide, replacements: dict[str, str | None]
+) -> bool:
+    replaced = False
+    for shape in slide.shapes:
+        if not shape.has_text_frame:
+            continue
+        for paragraph in shape.text_frame.paragraphs:
+            for placeholder, value in replacements.items():
+                if not value:
+                    continue
+                if _replace_placeholder_in_paragraph_runs(paragraph, placeholder, value):
+                    replaced = True
+    return replaced
+
+
 def _capture_run_formatting(run):
     font = run.font
     color = font.color
@@ -1281,15 +1332,16 @@ def _update_waterfall_axis_placeholders(
     modelled_in_value: str | None,
     metric_value: str | None,
 ) -> None:
-    if modelled_in_value:
-        replace_text_in_slide_preserve_formatting(slide, "<modelled in>", modelled_in_value)
-    else:
+    replacements = {
+        "<modelled in>": modelled_in_value,
+        "<metric>": metric_value,
+    }
+    _replace_placeholders_in_slide_runs(slide, replacements)
+    if not modelled_in_value:
         logger.warning(
             "Missing/blank value for 'Sales will be modelled in:' in Project Details."
         )
-    if metric_value:
-        replace_text_in_slide_preserve_formatting(slide, "<metric>", metric_value)
-    else:
+    if not metric_value:
         logger.warning(
             "Missing/blank value for 'Volume metric (unique per dataset):' in Project Details."
         )
