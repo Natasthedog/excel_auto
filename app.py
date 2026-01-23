@@ -2976,7 +2976,8 @@ def populate_category_waterfall(
     template_slide = _find_slide_by_marker(prs, "<Waterfall Template>")
     if template_slide is None:
         raise ValueError("Could not find the <Waterfall Template> slide in the template.")
-    target_level_label_value = _resolve_target_level_label_value(
+    labels = target_labels or _target_level_labels_from_gathered_df(gathered_df)
+    target_level_label_value = labels[0] if labels else _resolve_target_level_label_value(
         gathered_df,
         target_labels,
         bucket_data,
@@ -2988,7 +2989,6 @@ def populate_category_waterfall(
         modelled_in_value=modelled_in_value,
         metric_value=metric_value,
     )
-    labels = target_labels or _target_level_labels_from_gathered_df(gathered_df)
     if not labels:
         return
     first_slide = template_slide
