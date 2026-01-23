@@ -665,7 +665,11 @@ def _compute_bucket_deltas(
         selected_cols = [
             col for col in config.get("subheaders_included", []) if col in data_df.columns
         ]
-        target_labels = config.get("target_labels") or ["Own", "Cross"]
+        target_labels = config.get("target_labels")
+        if target_labels is None:
+            target_labels = ["Own", "Cross"]
+        if not target_labels:
+            continue
         ordered_targets = []
         normalized_targets = []
         for label in target_labels:
@@ -2331,8 +2335,6 @@ def apply_bucket_selection(
         target_labels = bucket_type_map.get(group)
         if target_labels is None:
             target_labels = ["Own", "Cross"]
-        if not target_labels:
-            return no_update, no_update, "Select Own and/or Cross for the bucket groups."
         bucket_config[group] = {
             "target_labels": target_labels,
             "subheaders_included": selected_group_columns,
