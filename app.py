@@ -1521,38 +1521,17 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 continue
             seen_refs.add(id(ref))
             deduped_refs.append(ref)
-        labs_column = None
-        if chart_series is not None and _is_positive_series(chart_series):
-            labs_column = _find_header_column(ws, ["labs-Positives"])
-        elif chart_series is not None and _is_negative_series(chart_series):
-            labs_column = _find_header_column(ws, ["labs-Negatives"])
-        if labs_column is None:
-            series_label_text = str(series_label).lower()
-            if "positive" in series_label_text:
-                labs_column = _find_header_column(ws, ["labs-Positives"])
-            elif "negative" in series_label_text:
-                labs_column = _find_header_column(ws, ["labs-Negatives"])
-        if labs_column is None:
-            positive_col = _find_header_column(ws, ["labs-Positives"])
-            negative_col = _find_header_column(ws, ["labs-Negatives"])
-            if positive_col and not negative_col:
-                labs_column = positive_col
-            elif negative_col and not positive_col:
-                labs_column = negative_col
-        if labs_column is None:
-            labs_candidates = []
-            for col_idx in range(1, ws.max_column + 1):
-                header = ws.cell(row=1, column=col_idx).value
-                if header is None:
-                    continue
-                header_text = _normalize_column_name(str(header))
-                if header_text.startswith("labs"):
-                    labs_candidates.append(col_idx)
-            if len(labs_candidates) == 1:
-                labs_column = labs_candidates[0]
-        if chart_series is not None and labs_column is None:
+        mapped_header, mapped_labs_column = _resolve_waterfall_labs_column(ws, series_label)
+        if mapped_header and mapped_labs_column:
             logger.info(
-                "Waterfall chart cache update: series %s data label column missing for labs",
+                "Waterfall chart cache update: series %s mapped to %s (%s)",
+                series_label,
+                mapped_header,
+                get_column_letter(mapped_labs_column),
+            )
+        else:
+            logger.info(
+                "Waterfall chart cache update: series %s labs mapping missing",
                 series_label,
             )
         bounds = series_category_bounds.get(idx) or series_value_bounds.get(idx)
@@ -1587,21 +1566,45 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 expected_formula = None
                 formula_bounds = _range_boundaries_from_formula(f_node.text)
                 formula_col = formula_bounds[0] if formula_bounds else None
-                effective_label_col = labs_column
-                if formula_col in label_columns:
-                    effective_label_col = formula_col
-                if labs_column:
-                    if min_row is not None and max_row is not None:
-                        expected_formula = _build_cell_range_formula(
-                            sheet_name,
-                            effective_label_col,
-                            min_row,
-                            max_row,
+                effective_label_col = mapped_labs_column or formula_col
+                if mapped_labs_column and min_row is not None and max_row is not None:
+                    expected_formula = _build_cell_range_formula(
+                        sheet_name,
+                        effective_label_col,
+                        min_row,
+                        max_row,
+                    )
+                    if f_node.text != expected_formula:
+                        logger.info(
+                            "Waterfall chart cache update: series %s label formula %s -> %s",
+                            series_label,
+                            f_node.text,
+                            expected_formula,
                         )
-                        if (
-                            f_node.text != expected_formula
-                            and formula_col not in label_columns
-                        ):
+                        f_node.text = expected_formula
+                elif effective_label_col and min_row is not None and max_row is not None:
+                    expected_formula = _build_cell_range_formula(
+                        sheet_name,
+                        effective_label_col,
+                        min_row,
+                        max_row,
+                    )
+                elif effective_label_col:
+                    series_points = series_point_counts.get(idx)
+                    if series_points:
+                        expected_formula = _build_cell_range_formula(
+                            sheet_name or ws.title,
+                            effective_label_col,
+                            2,
+                            1 + series_points,
+                        )
+                        if f_node.text != expected_formula:
+                            logger.info(
+                                "Waterfall chart cache update: series %s label formula %s -> %s",
+                                series_label,
+                                f_node.text,
+                                expected_formula,
+                            )
                             f_node.text = expected_formula
                 label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
                     workbook, f_node.text
@@ -1650,6 +1653,11 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                         expected_formula,
                     )
                 logger.info(
+                    "Waterfall chart cache update: series %s data label formula now %s",
+                    series_label,
+                    f_node.text,
+                )
+                logger.info(
                     "Waterfall chart cache update: series %s data label formula %s cached %s points",
                     series_label,
                     f_node.text,
@@ -1680,20 +1688,23 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                         series_label,
                     )
                     continue
+                logger.info(
+                    "Waterfall chart cache update: series %s c15 label formula %s",
+                    series_label,
+                    c15_formula_node.text,
+                )
                 expected_formula = None
                 formula_bounds = _range_boundaries_from_formula(c15_formula_node.text)
                 formula_col = formula_bounds[0] if formula_bounds else None
-                effective_label_col = labs_column
-                if formula_col in label_columns:
-                    effective_label_col = formula_col
-                if labs_column and min_row is not None and max_row is not None:
+                effective_label_col = mapped_labs_column or formula_col
+                if effective_label_col and min_row is not None and max_row is not None:
                     expected_formula = _build_cell_range_formula(
                         sheet_name,
                         effective_label_col,
                         min_row,
                         max_row,
                     )
-                elif labs_column:
+                elif effective_label_col:
                     series_points = series_point_counts.get(idx)
                     if series_points:
                         expected_formula = _build_cell_range_formula(
@@ -1702,11 +1713,13 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                             2,
                             1 + series_points,
                         )
-                if (
-                    expected_formula
-                    and c15_formula_node.text != expected_formula
-                    and formula_col not in label_columns
-                ):
+                if expected_formula and c15_formula_node.text != expected_formula:
+                    logger.info(
+                        "Waterfall chart cache update: series %s c15 label formula %s -> %s",
+                        series_label,
+                        c15_formula_node.text,
+                        expected_formula,
+                    )
                     c15_formula_node.text = expected_formula
                 label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
                     workbook, c15_formula_node.text
@@ -1728,6 +1741,11 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                     ["" if value is None else str(value) for value in label_values],
                     nsmap,
                     f"series {series_label}",
+                )
+                logger.info(
+                    "Waterfall chart cache update: series %s c15 label formula now %s",
+                    series_label,
+                    c15_formula_node.text,
                 )
     for ref_node in plot_only_refs:
         f_node = ref_node.find("c:f", namespaces=nsmap)
@@ -2026,6 +2044,114 @@ def _format_waterfall_label(value: float, sign: str) -> str:
         scaled = abs_value
         suffix = ""
     return f"{sign}{scaled:.1f}{suffix}"
+
+
+def _waterfall_labs_header_for_series(series_name: str | None) -> str | None:
+    if not series_name:
+        return None
+    series_label = str(series_name).strip().lower()
+    if "base" in series_label:
+        return "labs-Base"
+    if "promo" in series_label:
+        return "labs-Promo"
+    if "media" in series_label:
+        return "labs-Media"
+    if "blank" in series_label:
+        return "labs-Blanks"
+    if "positive" in series_label:
+        return "labs-Positives"
+    if "negative" in series_label:
+        return "labs-Negatives"
+    return None
+
+
+def _resolve_waterfall_labs_column(ws, series_name: str | None) -> tuple[str | None, int | None]:
+    header = _waterfall_labs_header_for_series(series_name)
+    if not header:
+        return None, None
+    return header, _find_header_column(ws, [header])
+
+
+def _update_all_waterfall_labs(
+    ws,
+    base_indices: tuple[int, int] | None,
+    base_values: tuple[float, float] | None,
+) -> None:
+    labs_base_col = _find_header_column(ws, ["labs-Base"])
+    labs_promo_col = _find_header_column(ws, ["labs-Promo"])
+    labs_media_col = _find_header_column(ws, ["labs-Media"])
+    labs_blanks_col = _find_header_column(ws, ["labs-Blanks"])
+    labs_positives_col = _find_header_column(ws, ["labs-Positives"])
+    labs_negatives_col = _find_header_column(ws, ["labs-Negatives"])
+
+    promo_col = _find_header_column(ws, ["Promo"])
+    media_col = _find_header_column(ws, ["Media"])
+    positives_col = _find_header_column(ws, ["Positives"])
+    negatives_col = _find_header_column(ws, ["Negatives"])
+
+    total_rows = ws.max_row
+    if labs_base_col:
+        for row_idx in range(2, total_rows + 1):
+            ws.cell(row=row_idx, column=labs_base_col).value = None
+        if base_indices and base_values:
+            formatted = [_format_lab_base_value(value) for value in base_values]
+            for idx, base_row in enumerate(base_indices):
+                if base_row is None or base_row < 0:
+                    continue
+                row_idx = base_row + 2
+                if row_idx <= total_rows:
+                    ws.cell(row=row_idx, column=labs_base_col).value = formatted[idx]
+
+    for row_idx in range(2, total_rows + 1):
+        if labs_promo_col:
+            value = _numeric_cell_value(ws.cell(row=row_idx, column=promo_col)) if promo_col else None
+            cell = ws.cell(row=row_idx, column=labs_promo_col)
+            if value is None or value == 0:
+                cell.value = None
+            else:
+                sign = "+" if value > 0 else "-"
+                cell.value = _format_waterfall_label(value, sign)
+        if labs_media_col:
+            value = _numeric_cell_value(ws.cell(row=row_idx, column=media_col)) if media_col else None
+            cell = ws.cell(row=row_idx, column=labs_media_col)
+            if value is None or value == 0:
+                cell.value = None
+            else:
+                sign = "+" if value > 0 else "-"
+                cell.value = _format_waterfall_label(value, sign)
+        if labs_blanks_col:
+            ws.cell(row=row_idx, column=labs_blanks_col).value = None
+        if labs_positives_col:
+            pos_value = (
+                _numeric_cell_value(ws.cell(row=row_idx, column=positives_col))
+                if positives_col
+                else None
+            )
+            cell = ws.cell(row=row_idx, column=labs_positives_col)
+            if pos_value is None or pos_value == 0:
+                cell.value = None
+            else:
+                cell.value = _format_waterfall_label(pos_value, "+")
+        if labs_negatives_col:
+            neg_value = (
+                _numeric_cell_value(ws.cell(row=row_idx, column=negatives_col))
+                if negatives_col
+                else None
+            )
+            cell = ws.cell(row=row_idx, column=labs_negatives_col)
+            if neg_value is None or neg_value == 0:
+                cell.value = None
+            else:
+                cell.value = _format_waterfall_label(neg_value, "-")
+    logger.info(
+        "Waterfall chart labels: overwrote labs columns with literal values (Base=%s, Promo=%s, Media=%s, Blanks=%s, Positives=%s, Negatives=%s).",
+        bool(labs_base_col),
+        bool(labs_promo_col),
+        bool(labs_media_col),
+        bool(labs_blanks_col),
+        bool(labs_positives_col),
+        bool(labs_negatives_col),
+    )
 
 
 def _update_waterfall_positive_negative_labels(ws) -> None:
@@ -3172,7 +3298,7 @@ def _add_waterfall_chart_from_template(
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
     _ensure_negatives_column_positive(updated_wb.active)
-    _update_waterfall_positive_negative_labels(updated_wb.active)
+    _update_all_waterfall_labs(updated_wb.active, base_indices, base_values)
     _save_chart_workbook(chart_shape.chart, updated_wb)
     _update_waterfall_chart_caches(chart_shape.chart, updated_wb, categories)
     _update_waterfall_yoy_arrows(slide, base_values)
@@ -3270,7 +3396,7 @@ def _update_waterfall_chart(
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
     _ensure_negatives_column_positive(updated_wb.active)
-    _update_waterfall_positive_negative_labels(updated_wb.active)
+    _update_all_waterfall_labs(updated_wb.active, base_indices, base_values)
     _save_chart_workbook(chart, updated_wb)
     _update_waterfall_chart_caches(chart, updated_wb, categories)
     _update_waterfall_yoy_arrows(slide, base_values)
