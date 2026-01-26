@@ -2,6 +2,7 @@
 import io
 import base64
 import logging
+import copy
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -1486,34 +1487,75 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
     label_cache_updates = 0
     label_cache_missing = 0
     c15_label_updates = 0
-    series_label_refs = []
-    for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
-        series_label = series_names[idx - 1] if idx - 1 < len(series_names) else f"Series {idx}"
-        chart_series = chart.series[idx - 1] if idx - 1 < len(chart.series) else None
-        label_refs = ser.findall(".//c:dLbls//c:dLbl//c:tx//c:strRef", namespaces=nsmap)
-        label_refs += ser.findall(".//c:dLbls//c:tx//c:strRef", namespaces=nsmap)
-        series_label_refs.append((idx, series_label, chart_series, label_refs))
-    plot_level_refs = root.findall(
-        "c:plotArea//c:dLbls//c:tx//c:strRef", namespaces=nsmap
-    )
-    plot_only_refs = []
-    for ref_node in plot_level_refs:
-        current = ref_node.getparent()
-        has_series_ancestor = False
-        while current is not None:
-            if current.tag.endswith("ser"):
-                has_series_ancestor = True
-                break
-            current = current.getparent()
-        if not has_series_ancestor:
-            plot_only_refs.append(ref_node)
-    series_ref_count = sum(len(entry[3]) for entry in series_label_refs)
+    def _collect_label_refs():
+        series_refs = []
+        for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
+            series_label = series_names[idx - 1] if idx - 1 < len(series_names) else f"Series {idx}"
+            chart_series = chart.series[idx - 1] if idx - 1 < len(chart.series) else None
+            label_refs = ser.findall(".//c:dLbls//c:dLbl//c:tx//c:strRef", namespaces=nsmap)
+            label_refs += ser.findall(".//c:dLbls//c:tx//c:strRef", namespaces=nsmap)
+            series_refs.append((idx, series_label, chart_series, label_refs, ser))
+        plot_level_refs = root.findall(
+            "c:plotArea//c:dLbls//c:tx//c:strRef", namespaces=nsmap
+        )
+        plot_level_dlbls = root.findall("c:plotArea/c:dLbls", namespaces=nsmap)
+        plot_refs = []
+        for ref_node in plot_level_refs:
+            current = ref_node.getparent()
+            has_series_ancestor = False
+            while current is not None:
+                if current.tag.endswith("ser"):
+                    has_series_ancestor = True
+                    break
+                current = current.getparent()
+            if not has_series_ancestor:
+                plot_refs.append(ref_node)
+        series_ref_count_local = sum(len(entry[3]) for entry in series_refs)
+        return series_refs, plot_refs, series_ref_count_local, plot_level_dlbls
+
+    series_label_refs, plot_only_refs, series_ref_count, plot_level_dlbls = _collect_label_refs()
     logger.info(
         "Waterfall chart cache update: data label strRef nodes found (series=%s, plot-level=%s)",
         series_ref_count,
         len(plot_only_refs),
     )
-    for idx, series_label, chart_series, label_refs in series_label_refs:
+    if series_ref_count == 0 and (plot_only_refs or plot_level_dlbls):
+        plot_dlbls = None
+        if plot_level_dlbls:
+            plot_dlbls = plot_level_dlbls[0]
+        for ref_node in plot_only_refs:
+            current = ref_node
+            while current is not None and not current.tag.endswith("dLbls"):
+                current = current.getparent()
+            if current is not None:
+                plot_dlbls = current
+                break
+        if plot_dlbls is None:
+            plot_dlbls = root.find(".//c:plotArea//c:dLbls", namespaces=nsmap)
+        if plot_dlbls is None:
+            logger.info(
+                "Waterfall chart cache update: plot-level data labels not found for promotion",
+            )
+        else:
+            promoted = 0
+            for ser in root.findall(".//c:plotArea//c:ser", namespaces=nsmap):
+                if ser.find("c:dLbls", namespaces=nsmap) is None:
+                    ser.append(copy.deepcopy(plot_dlbls))
+                    promoted += 1
+            parent = plot_dlbls.getparent()
+            if parent is not None:
+                parent.remove(plot_dlbls)
+            logger.info(
+                "Waterfall chart cache update: promoted plot-level data labels into %s series and removed plot-level node",
+                promoted,
+            )
+            series_label_refs, plot_only_refs, series_ref_count, plot_level_dlbls = _collect_label_refs()
+            logger.info(
+                "Waterfall chart cache update: data label strRef nodes found after promotion (series=%s, plot-level=%s)",
+                series_ref_count,
+                len(plot_only_refs),
+            )
+    for idx, series_label, chart_series, label_refs, ser in series_label_refs:
         seen_refs = set()
         deduped_refs = []
         for ref in label_refs:
@@ -1522,6 +1564,27 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
             seen_refs.add(id(ref))
             deduped_refs.append(ref)
         mapped_header, mapped_labs_column = _resolve_waterfall_labs_column(ws, series_label)
+        if mapped_labs_column is None:
+            value_formula_node = ser.find("c:val/c:numRef/c:f", namespaces=nsmap)
+            if value_formula_node is not None and value_formula_node.text:
+                value_bounds = _range_boundaries_from_formula(value_formula_node.text)
+                if value_bounds:
+                    value_col = value_bounds[0]
+                    base_header = ws.cell(row=1, column=value_col).value
+                    if base_header:
+                        derived_header = f"labs-{str(base_header).strip()}"
+                        derived_col = _find_header_column(ws, [derived_header])
+                        if derived_col is not None:
+                            resolved_header = ws.cell(row=1, column=derived_col).value
+                            mapped_header = derived_header
+                            mapped_labs_column = derived_col
+                            logger.info(
+                                "Waterfall chart cache update: series %s fallback labs header resolved %s -> %s (%s)",
+                                series_label,
+                                derived_header,
+                                resolved_header,
+                                get_column_letter(derived_col),
+                            )
         if mapped_header and mapped_labs_column:
             logger.info(
                 "Waterfall chart cache update: series %s mapped to %s (%s)",
@@ -1558,6 +1621,7 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                         series_label,
                     )
                     continue
+                original_formula = f_node.text
                 logger.info(
                     "Waterfall chart cache update: series %s data label ref formula %s",
                     series_label,
@@ -1606,6 +1670,12 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                                 expected_formula,
                             )
                             f_node.text = expected_formula
+                logger.info(
+                    "Waterfall chart cache update: series %s label formula resolved %s -> %s",
+                    series_label,
+                    original_formula,
+                    f_node.text,
+                )
                 label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
                     workbook, f_node.text
                 )
@@ -1691,6 +1761,7 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                         series_label,
                     )
                     continue
+                original_c15_formula = c15_formula_node.text
                 logger.info(
                     "Waterfall chart cache update: series %s c15 label formula %s",
                     series_label,
@@ -1724,6 +1795,12 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                         expected_formula,
                     )
                     c15_formula_node.text = expected_formula
+                logger.info(
+                    "Waterfall chart cache update: series %s c15 label formula resolved %s -> %s",
+                    series_label,
+                    original_c15_formula,
+                    c15_formula_node.text,
+                )
                 label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
                     workbook, c15_formula_node.text
                 )

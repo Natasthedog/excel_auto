@@ -171,6 +171,72 @@ def _insert_value_from_cells_labels(
     template_path.write_bytes(output.getvalue())
 
 
+def _insert_plot_level_value_from_cells_labels(template_path) -> None:
+    template_bytes = template_path.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(template_bytes)) as zf:
+        chart_files = [
+            name
+            for name in zf.namelist()
+            if name.startswith("ppt/charts/chart") and name.endswith(".xml")
+        ]
+        assert chart_files
+        chart_name = chart_files[0]
+        chart_xml = zf.read(chart_name)
+
+    ns_c = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+    ns_c15 = "http://schemas.microsoft.com/office/drawing/2012/chart"
+    ET.register_namespace("c", ns_c)
+    ET.register_namespace("c15", ns_c15)
+    root = ET.fromstring(chart_xml)
+    ns = {"c": ns_c}
+
+    plot_area = root.find(".//c:plotArea", ns)
+    assert plot_area is not None
+    for ser in plot_area.findall(".//c:ser", ns):
+        d_lbls = ser.find("c:dLbls", ns)
+        if d_lbls is not None:
+            ser.remove(d_lbls)
+    for node in list(plot_area):
+        if node.tag.endswith("dLbls"):
+            plot_area.remove(node)
+
+    d_lbls = ET.SubElement(plot_area, f"{{{ns_c}}}dLbls")
+    tx = ET.SubElement(d_lbls, f"{{{ns_c}}}tx")
+    str_ref = ET.SubElement(tx, f"{{{ns_c}}}strRef")
+    f_node = ET.SubElement(str_ref, f"{{{ns_c}}}f")
+    f_node.text = "Sheet1!$H$2:$H$4"
+    str_cache = ET.SubElement(str_ref, f"{{{ns_c}}}strCache")
+    pt_count = ET.SubElement(str_cache, f"{{{ns_c}}}ptCount")
+    pt_count.set("val", "3")
+    for idx, value in enumerate(["plot-1", "plot-2", "plot-3"]):
+        pt = ET.SubElement(str_cache, f"{{{ns_c}}}pt", idx=str(idx))
+        v = ET.SubElement(pt, f"{{{ns_c}}}v")
+        v.text = value
+
+    c15_range = ET.SubElement(d_lbls, f"{{{ns_c15}}}datalabelsRange")
+    c15_f = ET.SubElement(c15_range, f"{{{ns_c15}}}f")
+    c15_f.text = "Sheet1!$H$2:$H$4"
+    c15_cache = ET.SubElement(c15_range, f"{{{ns_c15}}}dlblRangeCache")
+    c15_pt_count = ET.SubElement(c15_cache, f"{{{ns_c15}}}ptCount")
+    c15_pt_count.set("val", "3")
+    for idx, value in enumerate(["plot-1", "plot-2", "plot-3"]):
+        pt = ET.SubElement(c15_cache, f"{{{ns_c15}}}pt", idx=str(idx))
+        v = ET.SubElement(pt, f"{{{ns_c15}}}v")
+        v.text = value
+
+    updated_chart_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(template_bytes)) as zf:
+        with zipfile.ZipFile(output, "w") as zf_out:
+            for info in zf.infolist():
+                data = zf.read(info.filename)
+                if info.filename == chart_name:
+                    data = updated_chart_xml
+                zf_out.writestr(info, data)
+    template_path.write_bytes(output.getvalue())
+
+
 def test_waterfall_c15_labels_render_without_edit_data(tmp_path) -> None:
     template_path = tmp_path / "template.pptx"
     build_test_template(template_path, waterfall_slide_count=1)
@@ -323,3 +389,66 @@ def test_waterfall_c15_labels_update_multiple_columns(tmp_path) -> None:
     c15_formula = c15_range.find("c15:f", ns)
     assert c15_formula is not None
     assert "$H$" in c15_formula.text
+
+
+def test_waterfall_plot_level_labels_promote_to_series(tmp_path) -> None:
+    template_path = tmp_path / "template.pptx"
+    build_test_template(template_path, waterfall_slide_count=1)
+    _insert_plot_level_value_from_cells_labels(template_path)
+
+    df = build_sample_dataframe(["Alpha"], include_brand=False)
+    excel_path = tmp_path / "input.xlsx"
+    write_excel(df, excel_path)
+    df_from_excel = pd.read_excel(excel_path)
+    pptx_bytes = build_deck_bytes(template_path, df_from_excel, waterfall_targets=["Alpha"])
+
+    with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as zf:
+        chart_files = [
+            name
+            for name in zf.namelist()
+            if name.startswith("ppt/charts/chart") and name.endswith(".xml")
+        ]
+        assert chart_files
+        chart_xml = zf.read(chart_files[0])
+        embedding_files = [
+            name
+            for name in zf.namelist()
+            if name.startswith("ppt/embeddings/") and name.endswith(".xlsx")
+        ]
+        assert embedding_files
+        workbook_bytes = zf.read(embedding_files[0])
+
+    ns = {
+        "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+        "c15": "http://schemas.microsoft.com/office/drawing/2012/chart",
+    }
+    root = ET.fromstring(chart_xml)
+    workbook = load_workbook(io.BytesIO(workbook_bytes))
+    ws = workbook.active
+
+    plot_level_dlbls = root.findall("c:plotArea/c:dLbls", ns)
+    assert not plot_level_dlbls
+
+    formulas = []
+    for series_node in root.findall(".//c:ser", ns):
+        value_formula = series_node.find("c:val/c:numRef/c:f", ns)
+        assert value_formula is not None and value_formula.text
+        _, _, sheet_name = _worksheet_and_range_from_formula(workbook, value_formula.text)
+        bounds = _range_boundaries_from_formula(value_formula.text)
+        assert bounds is not None
+        value_col, min_row, _, max_row = bounds
+        base_header = ws.cell(row=1, column=value_col).value
+        assert base_header is not None
+        labs_header = f"labs-{str(base_header).strip()}"
+        labs_col = _find_header_column(ws, [labs_header])
+        assert labs_col is not None
+        expected_formula = _build_cell_range_formula(sheet_name, labs_col, min_row, max_row)
+
+        c15_range = series_node.find(".//c15:datalabelsRange", ns)
+        assert c15_range is not None
+        c15_formula = c15_range.find("c15:f", ns)
+        assert c15_formula is not None
+        formulas.append(c15_formula.text)
+        assert c15_formula.text == expected_formula
+
+    assert len(set(formulas)) > 1
