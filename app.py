@@ -1248,6 +1248,58 @@ def _update_str_cache(str_cache, values: list[str]) -> None:
         v.text = "" if value is None else str(value)
 
 
+def _update_c15_label_range_cache(
+    container,
+    formula: str | None,
+    labels: list[str],
+    nsmap: dict,
+    label_context: str,
+) -> int:
+    c15_blocks = container.findall(".//c15:datalabelsRange", namespaces=nsmap)
+    if not c15_blocks:
+        logger.info(
+            "Waterfall chart cache update: %s no c15 label-range block found",
+            label_context,
+        )
+        return 0
+    logger.info(
+        "Waterfall chart cache update: %s c15 label-range blocks found %s",
+        label_context,
+        len(c15_blocks),
+    )
+    c15_ns = nsmap.get("c15", "http://schemas.microsoft.com/office/drawing/2012/chart")
+    for c15_block in c15_blocks:
+        f_node = c15_block.find("c15:f", namespaces=nsmap)
+        if f_node is None:
+            f_node = etree.SubElement(c15_block, f"{{{c15_ns}}}f")
+        if formula:
+            f_node.text = formula
+            logger.info(
+                "Waterfall chart cache update: %s c15 label-range formula set to %s",
+                label_context,
+                formula,
+            )
+        cache = c15_block.find("c15:dlblRangeCache", namespaces=nsmap)
+        if cache is None:
+            cache = etree.SubElement(c15_block, f"{{{c15_ns}}}dlblRangeCache")
+        pt_count = cache.find("c15:ptCount", namespaces=nsmap)
+        if pt_count is None:
+            pt_count = etree.SubElement(cache, f"{{{c15_ns}}}ptCount")
+        pt_count.set("val", str(len(labels)))
+        for pt in list(cache.findall("c15:pt", namespaces=nsmap)):
+            cache.remove(pt)
+        for idx, value in enumerate(labels):
+            pt = etree.SubElement(cache, f"{{{c15_ns}}}pt", idx=str(idx))
+            v = etree.SubElement(pt, f"{{{c15_ns}}}v")
+            v.text = "" if value is None else str(value)
+        logger.info(
+            "Waterfall chart cache update: %s c15 label-range cached %s points",
+            label_context,
+            len(labels),
+        )
+    return len(c15_blocks)
+
+
 def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> None:
     chart_part = chart.part
     root = chart_part._element
@@ -1376,6 +1428,7 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
 
     label_cache_updates = 0
     label_cache_missing = 0
+    c15_label_updates = 0
     series_label_refs = []
     for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
         series_label = series_names[idx - 1] if idx - 1 < len(series_names) else f"Series {idx}"
@@ -1423,6 +1476,7 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 "Waterfall chart cache update: series %s data label column missing for labs",
                 series_label,
             )
+        c15_updated = False
         for ref_node in deduped_refs:
             f_node = ref_node.find("c:f", namespaces=nsmap)
             if f_node is None or not f_node.text:
@@ -1471,6 +1525,15 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 ["" if value is None else str(value) for value in label_values],
             )
             label_cache_updates += 1
+            if not c15_updated:
+                c15_label_updates += _update_c15_label_range_cache(
+                    ser,
+                    expected_formula or f_node.text,
+                    ["" if value is None else str(value) for value in label_values],
+                    nsmap,
+                    f"series {series_label}",
+                )
+                c15_updated = True
             logger.info(
                 "Waterfall chart cache update: series %s cached %s data label points",
                 series_label,
@@ -1521,6 +1584,17 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
             ["" if value is None else str(value) for value in label_values],
         )
         label_cache_updates += 1
+        d_lbls_node = ref_node
+        while d_lbls_node is not None and not d_lbls_node.tag.endswith("dLbls"):
+            d_lbls_node = d_lbls_node.getparent()
+        if d_lbls_node is not None:
+            c15_label_updates += _update_c15_label_range_cache(
+                d_lbls_node,
+                f_node.text,
+                ["" if value is None else str(value) for value in label_values],
+                nsmap,
+                "plot-level",
+            )
         logger.info(
             "Waterfall chart cache update: plot-level cached %s data label points",
             len(label_values),
@@ -1534,6 +1608,11 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
         logger.info(
             "Waterfall chart cache update: %s data label caches updated",
             label_cache_updates,
+        )
+    if c15_label_updates:
+        logger.info(
+            "Waterfall chart cache update: %s c15 label-range caches updated",
+            c15_label_updates,
         )
     elif label_cache_missing:
         logger.info(
