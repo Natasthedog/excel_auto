@@ -1612,9 +1612,12 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
                 label_values = _flatten_cell_values(label_rows)
                 if _all_blank(label_values):
-                    raise ValueError(
-                        f"Chart cache: data label range '{f_node.text}' for series '{series_label}' is blank."
+                    logger.info(
+                        "Waterfall chart cache update: series %s data label range '%s' is blank; skipping cache update",
+                        series_label,
+                        f_node.text,
                     )
+                    continue
                 series_points = series_point_counts.get(idx, len(label_values))
                 if len(label_values) < series_points:
                     label_values += ["" for _ in range(series_points - len(label_values))]
@@ -1727,9 +1730,12 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
                 label_values = _flatten_cell_values(label_rows)
                 if _all_blank(label_values):
-                    raise ValueError(
-                        f"Chart cache: data label range '{c15_formula_node.text}' for series '{series_label}' is blank."
+                    logger.info(
+                        "Waterfall chart cache update: series %s c15 label range '%s' is blank; skipping cache update",
+                        series_label,
+                        c15_formula_node.text,
                     )
+                    continue
                 series_points = series_point_counts.get(idx, len(label_values))
                 if len(label_values) < series_points:
                     label_values += ["" for _ in range(series_points - len(label_values))]
