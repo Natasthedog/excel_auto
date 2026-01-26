@@ -1047,9 +1047,19 @@ def _worksheet_and_range_from_formula(workbook, formula: str) -> tuple:
     ws = workbook.active
     if sheet_name:
         if sheet_name not in workbook.sheetnames:
-            raise ValueError(
-                f"Chart cache: sheet '{sheet_name}' from formula '{formula}' not found."
-            )
+            resolved = _find_sheet_by_candidates(workbook.sheetnames, sheet_name)
+            if resolved:
+                logger.info(
+                    "Chart cache: resolved sheet '%s' -> '%s' from formula '%s'",
+                    sheet_name,
+                    resolved,
+                    formula,
+                )
+                sheet_name = resolved
+            else:
+                raise ValueError(
+                    f"Chart cache: sheet '{sheet_name}' from formula '{formula}' not found."
+                )
         ws = workbook[sheet_name]
     return ws, ref, sheet_name
 
