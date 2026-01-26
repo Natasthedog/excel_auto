@@ -290,3 +290,36 @@ def test_waterfall_c15_labels_respects_label_column(tmp_path) -> None:
     expected_formula = _build_cell_range_formula(sheet_name, 8, min_row, max_row)
 
     assert c15_formula.text == expected_formula
+
+
+def test_waterfall_c15_labels_update_multiple_columns(tmp_path) -> None:
+    template_path = tmp_path / "template.pptx"
+    build_test_template(template_path, waterfall_slide_count=1)
+    _insert_value_from_cells_labels(template_path, label_column_idx=8)
+
+    df = build_sample_dataframe(["Alpha"], include_brand=False)
+    excel_path = tmp_path / "input.xlsx"
+    write_excel(df, excel_path)
+    df_from_excel = pd.read_excel(excel_path)
+    pptx_bytes = build_deck_bytes(template_path, df_from_excel, waterfall_targets=["Alpha"])
+
+    with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as zf:
+        chart_files = [
+            name
+            for name in zf.namelist()
+            if name.startswith("ppt/charts/chart") and name.endswith(".xml")
+        ]
+        assert chart_files
+        chart_xml = zf.read(chart_files[0])
+
+    ns = {
+        "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+        "c15": "http://schemas.microsoft.com/office/drawing/2012/chart",
+    }
+    root = ET.fromstring(chart_xml)
+    series_node = root.findall(".//c:ser", ns)[1]
+    c15_range = series_node.find(".//c15:datalabelsRange", ns)
+    assert c15_range is not None
+    c15_formula = c15_range.find("c15:f", ns)
+    assert c15_formula is not None
+    assert "$H$" in c15_formula.text

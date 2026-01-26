@@ -1587,11 +1587,14 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 expected_formula = None
                 formula_bounds = _range_boundaries_from_formula(f_node.text)
                 formula_col = formula_bounds[0] if formula_bounds else None
+                effective_label_col = labs_column
+                if formula_col in label_columns:
+                    effective_label_col = formula_col
                 if labs_column:
                     if min_row is not None and max_row is not None:
                         expected_formula = _build_cell_range_formula(
                             sheet_name,
-                            labs_column,
+                            effective_label_col,
                             min_row,
                             max_row,
                         )
@@ -1680,10 +1683,13 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 expected_formula = None
                 formula_bounds = _range_boundaries_from_formula(c15_formula_node.text)
                 formula_col = formula_bounds[0] if formula_bounds else None
+                effective_label_col = labs_column
+                if formula_col in label_columns:
+                    effective_label_col = formula_col
                 if labs_column and min_row is not None and max_row is not None:
                     expected_formula = _build_cell_range_formula(
                         sheet_name,
-                        labs_column,
+                        effective_label_col,
                         min_row,
                         max_row,
                     )
@@ -1692,7 +1698,7 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                     if series_points:
                         expected_formula = _build_cell_range_formula(
                             sheet_name or ws.title,
-                            labs_column,
+                            effective_label_col,
                             2,
                             1 + series_points,
                         )
