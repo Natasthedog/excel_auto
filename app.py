@@ -973,7 +973,10 @@ def _save_chart_workbook(chart, workbook) -> None:
 
 
 def _chart_namespace_map(root) -> dict:
-    nsmap = {"c": "http://schemas.openxmlformats.org/drawingml/2006/chart"}
+    nsmap = {"c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
+             "a":   "http://schemas.openxmlformats.org/drawingml/2006/main",
+             "r":   "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+             "c15": "http://schemas.microsoft.com/office/drawing/2012/chart"}
     for prefix, uri in (root.nsmap or {}).items():
         if prefix and uri:
             nsmap[prefix] = uri
@@ -3768,4 +3771,5 @@ def finalize_download(status_text, data_contents):
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
