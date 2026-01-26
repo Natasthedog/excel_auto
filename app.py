@@ -1802,6 +1802,59 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
         )
 
 
+def _update_chart_label_caches(chart, workbook) -> None:
+    root = chart.part._element
+    nsmap = _chart_namespace_map(root)
+    label_refs = root.findall(".//c:dLbls//c:tx//c:strRef", namespaces=nsmap)
+    if not label_refs:
+        return
+    label_cache_updates = 0
+    c15_label_updates = 0
+    for ref_node in label_refs:
+        f_node = ref_node.find("c:f", namespaces=nsmap)
+        if f_node is None or not f_node.text:
+            logger.info("Chart label cache update: data label ref formula missing")
+            continue
+        label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
+            workbook, f_node.text
+        )
+        label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
+        label_values = _flatten_cell_values(label_rows)
+        if _all_blank(label_values):
+            logger.info(
+                "Chart label cache update: data label range '%s' is blank",
+                f_node.text,
+            )
+            continue
+        str_cache, _ = _ensure_str_cache(ref_node)
+        _update_str_cache(
+            str_cache,
+            ["" if value is None else str(value) for value in label_values],
+        )
+        label_cache_updates += 1
+        d_lbls_node = ref_node
+        while d_lbls_node is not None and not d_lbls_node.tag.endswith("dLbls"):
+            d_lbls_node = d_lbls_node.getparent()
+        if d_lbls_node is not None:
+            c15_label_updates += _update_c15_label_range_cache(
+                d_lbls_node,
+                f_node.text,
+                ["" if value is None else str(value) for value in label_values],
+                nsmap,
+                "chart",
+            )
+    if label_cache_updates:
+        logger.info(
+            "Chart label cache update: %s data label caches updated",
+            label_cache_updates,
+        )
+    if c15_label_updates:
+        logger.info(
+            "Chart label cache update: %s c15 label-range caches updated",
+            c15_label_updates,
+        )
+
+
 def _capture_label_columns(ws, series_names: list[str]) -> dict[int, dict[str, list]]:
     label_columns: dict[int, dict[str, list]] = {}
     series_lookup = {str(name).strip().lower() for name in series_names if name}
@@ -2084,6 +2137,8 @@ def update_or_add_column_chart(slide, chart_name, categories, series_dict):
     if chart_shape:
         # Replace data in existing chart (preserves template styling)
         chart_shape.chart.replace_data(cd)
+        updated_wb = _load_chart_workbook(chart_shape.chart)
+        _update_chart_label_caches(chart_shape.chart, updated_wb)
         return chart_shape
     else:
         # Fallback: repurpose the first chart on the slide if present.
@@ -2091,6 +2146,8 @@ def update_or_add_column_chart(slide, chart_name, categories, series_dict):
             if shape.has_chart:
                 shape.chart.replace_data(cd)
                 shape.name = chart_name
+                updated_wb = _load_chart_workbook(shape.chart)
+                _update_chart_label_caches(shape.chart, updated_wb)
                 return shape
         # Remove any stale shapes with the target name before adding a new chart
         for shape in list(slide.shapes):
@@ -2107,6 +2164,8 @@ def update_or_add_column_chart(slide, chart_name, categories, series_dict):
         chart = chart_shape.chart
         # Light touch formatting; rely on template/theme for styling
         chart.has_legend = True
+        updated_wb = _load_chart_workbook(chart)
+        _update_chart_label_caches(chart, updated_wb)
         return chart
 
 def update_or_add_waterfall_chart(slide, chart_name, categories, series_dict):
