@@ -1351,6 +1351,17 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
     root = chart_part._element
     nsmap = _chart_namespace_map(root)
     ws = workbook.active
+    label_columns = {
+        col_idx: ws.cell(row=1, column=col_idx).value
+        for col_idx in range(1, ws.max_column + 1)
+        if ws.cell(row=1, column=col_idx).value
+        and _normalize_column_name(str(ws.cell(row=1, column=col_idx).value)).startswith("labs")
+    }
+    if label_columns:
+        logger.info(
+            "Waterfall chart cache update: label columns found %s",
+            {idx: str(value) for idx, value in label_columns.items()},
+        )
     categories_values = ["" if value is None else str(value) for value in categories]
     categories_count = len(categories_values)
     logger.info("Waterfall chart cache update: %s category points", categories_count)
@@ -1574,6 +1585,8 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                     f_node.text,
                 )
                 expected_formula = None
+                formula_bounds = _range_boundaries_from_formula(f_node.text)
+                formula_col = formula_bounds[0] if formula_bounds else None
                 if labs_column:
                     if min_row is not None and max_row is not None:
                         expected_formula = _build_cell_range_formula(
@@ -1582,7 +1595,10 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                             min_row,
                             max_row,
                         )
-                        if f_node.text != expected_formula:
+                        if (
+                            f_node.text != expected_formula
+                            and formula_col not in label_columns
+                        ):
                             f_node.text = expected_formula
                 label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
                     workbook, f_node.text
@@ -1662,6 +1678,8 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                     )
                     continue
                 expected_formula = None
+                formula_bounds = _range_boundaries_from_formula(c15_formula_node.text)
+                formula_col = formula_bounds[0] if formula_bounds else None
                 if labs_column and min_row is not None and max_row is not None:
                     expected_formula = _build_cell_range_formula(
                         sheet_name,
@@ -1678,7 +1696,11 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                             2,
                             1 + series_points,
                         )
-                if expected_formula and c15_formula_node.text != expected_formula:
+                if (
+                    expected_formula
+                    and c15_formula_node.text != expected_formula
+                    and formula_col not in label_columns
+                ):
                     c15_formula_node.text = expected_formula
                 label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
                     workbook, c15_formula_node.text
