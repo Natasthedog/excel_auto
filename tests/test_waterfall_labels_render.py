@@ -86,7 +86,7 @@ def test_waterfall_labels_render_without_edit_data(tmp_path) -> None:
         assert num_pts > 0
 
 
-def _insert_value_from_cells_labels(template_path) -> None:
+def _insert_value_from_cells_labels(template_path, include_str_ref: bool = True) -> None:
     template_bytes = template_path.read_bytes()
     with zipfile.ZipFile(io.BytesIO(template_bytes)) as zf:
         chart_files = [
@@ -111,7 +111,6 @@ def _insert_value_from_cells_labels(template_path) -> None:
     ET.register_namespace("c", ns_c)
     ET.register_namespace("c15", ns_c15)
     root = ET.fromstring(chart_xml)
-    root.set("xmlns:c15", ns_c15)
     ns = {"c": ns_c}
     series_nodes = root.findall(".//c:ser", ns)
     assert len(series_nodes) >= 2
@@ -119,17 +118,18 @@ def _insert_value_from_cells_labels(template_path) -> None:
     d_lbls = series_node.find("c:dLbls", ns)
     if d_lbls is None:
         d_lbls = ET.SubElement(series_node, f"{{{ns_c}}}dLbls")
-    tx = ET.SubElement(d_lbls, f"{{{ns_c}}}tx")
-    str_ref = ET.SubElement(tx, f"{{{ns_c}}}strRef")
-    f_node = ET.SubElement(str_ref, f"{{{ns_c}}}f")
-    f_node.text = "Sheet1!$H$2:$H$4"
-    str_cache = ET.SubElement(str_ref, f"{{{ns_c}}}strCache")
-    pt_count = ET.SubElement(str_cache, f"{{{ns_c}}}ptCount")
-    pt_count.set("val", "3")
-    for idx, value in enumerate(["old-1", "old-2", "old-3"]):
-        pt = ET.SubElement(str_cache, f"{{{ns_c}}}pt", idx=str(idx))
-        v = ET.SubElement(pt, f"{{{ns_c}}}v")
-        v.text = value
+    if include_str_ref:
+        tx = ET.SubElement(d_lbls, f"{{{ns_c}}}tx")
+        str_ref = ET.SubElement(tx, f"{{{ns_c}}}strRef")
+        f_node = ET.SubElement(str_ref, f"{{{ns_c}}}f")
+        f_node.text = "Sheet1!$H$2:$H$4"
+        str_cache = ET.SubElement(str_ref, f"{{{ns_c}}}strCache")
+        pt_count = ET.SubElement(str_cache, f"{{{ns_c}}}ptCount")
+        pt_count.set("val", "3")
+        for idx, value in enumerate(["old-1", "old-2", "old-3"]):
+            pt = ET.SubElement(str_cache, f"{{{ns_c}}}pt", idx=str(idx))
+            v = ET.SubElement(pt, f"{{{ns_c}}}v")
+            v.text = value
 
     c15_range = ET.SubElement(d_lbls, f"{{{ns_c15}}}datalabelsRange")
     c15_f = ET.SubElement(c15_range, f"{{{ns_c15}}}f")
@@ -227,6 +227,10 @@ def test_waterfall_c15_labels_render_without_edit_data(tmp_path) -> None:
     assert int(pt_count.attrib.get("val", "0")) == len(expected_labels)
     points = cache.findall("c15:pt", ns)
     assert len(points) == len(expected_labels)
-    values = [pt.find("c15:v", ns).text if pt.find("c15:v", ns) is not None else "" for pt in points]
+    values = [
+        (pt.find("c15:v", ns).text or "") if pt.find("c15:v", ns) is not None else ""
+        for pt in points
+    ]
     assert values[0] == expected_labels[0]
     assert values[-1] == expected_labels[-1]
+
