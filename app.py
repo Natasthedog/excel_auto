@@ -1047,9 +1047,19 @@ def _worksheet_and_range_from_formula(workbook, formula: str) -> tuple:
     ws = workbook.active
     if sheet_name:
         if sheet_name not in workbook.sheetnames:
-            raise ValueError(
-                f"Chart cache: sheet '{sheet_name}' from formula '{formula}' not found."
-            )
+            resolved = _find_sheet_by_candidates(workbook.sheetnames, sheet_name)
+            if resolved:
+                logger.info(
+                    "Chart cache: resolved sheet '%s' -> '%s' from formula '%s'",
+                    sheet_name,
+                    resolved,
+                    formula,
+                )
+                sheet_name = resolved
+            else:
+                raise ValueError(
+                    f"Chart cache: sheet '{sheet_name}' from formula '{formula}' not found."
+                )
         ws = workbook[sheet_name]
     return ws, ref, sheet_name
 
@@ -1248,11 +1258,110 @@ def _update_str_cache(str_cache, values: list[str]) -> None:
         v.text = "" if value is None else str(value)
 
 
+def _update_c15_label_range_cache(
+    container,
+    formula: str | None,
+    labels: list[str],
+    nsmap: dict,
+    label_context: str,
+) -> int:
+    c15_blocks = []
+    if container is not None and str(getattr(container, "tag", "")).endswith("datalabelsRange"):
+        c15_blocks.append(container)
+    c15_blocks += container.findall(".//c15:datalabelsRange", namespaces=nsmap)
+    if not c15_blocks:
+        try:
+            c15_blocks = container.xpath(".//*[local-name()='datalabelsRange']")
+        except Exception:
+            c15_blocks = []
+    if c15_blocks:
+        seen = set()
+        deduped = []
+        for block in c15_blocks:
+            if id(block) in seen:
+                continue
+            seen.add(id(block))
+            deduped.append(block)
+        c15_blocks = deduped
+    if not c15_blocks:
+        logger.info(
+            "Waterfall chart cache update: %s no c15 label-range block found",
+            label_context,
+        )
+        return 0
+    logger.info(
+        "Waterfall chart cache update: %s c15 label-range blocks found %s",
+        label_context,
+        len(c15_blocks),
+    )
+    for c15_block in c15_blocks:
+        block_ns = etree.QName(c15_block).namespace or nsmap.get(
+            "c15", "http://schemas.microsoft.com/office/drawing/2012/chart"
+        )
+        f_node = c15_block.find("c15:f", namespaces=nsmap)
+        if f_node is None:
+            try:
+                f_node = c15_block.xpath("./*[local-name()='f']")[0]
+            except Exception:
+                f_node = None
+        if f_node is None:
+            f_node = etree.SubElement(c15_block, f"{{{block_ns}}}f")
+        if formula:
+            f_node.text = formula
+            logger.info(
+                "Waterfall chart cache update: %s c15 label-range formula set to %s",
+                label_context,
+                formula,
+            )
+        cache = c15_block.find("c15:dlblRangeCache", namespaces=nsmap)
+        if cache is None:
+            try:
+                cache = c15_block.xpath("./*[local-name()='dlblRangeCache']")[0]
+            except Exception:
+                cache = None
+        if cache is None:
+            cache = etree.SubElement(c15_block, f"{{{block_ns}}}dlblRangeCache")
+        pt_count = cache.find("c15:ptCount", namespaces=nsmap)
+        if pt_count is None:
+            try:
+                pt_count = cache.xpath("./*[local-name()='ptCount']")[0]
+            except Exception:
+                pt_count = None
+        if pt_count is None:
+            pt_count = etree.SubElement(cache, f"{{{block_ns}}}ptCount")
+        pt_count.set("val", str(len(labels)))
+        for pt in list(cache.findall("c15:pt", namespaces=nsmap)):
+            cache.remove(pt)
+        for pt in list(cache.xpath("./*[local-name()='pt']")):
+            cache.remove(pt)
+        for idx, value in enumerate(labels):
+            pt = etree.SubElement(cache, f"{{{block_ns}}}pt", idx=str(idx))
+            v = etree.SubElement(pt, f"{{{block_ns}}}v")
+            v.text = "" if value is None else str(value)
+        logger.info(
+            "Waterfall chart cache update: %s c15 label-range cached %s points",
+            label_context,
+            len(labels),
+        )
+    return len(c15_blocks)
+
+
 def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> None:
     chart_part = chart.part
     root = chart_part._element
     nsmap = _chart_namespace_map(root)
     ws = workbook.active
+    label_columns = {
+        col_idx: ws.cell(row=1, column=col_idx).value
+        for col_idx in range(1, ws.max_column + 1)
+        if ws.cell(row=1, column=col_idx).value
+        and _normalize_column_name(str(ws.cell(row=1, column=col_idx).value)).startswith("labs")
+    }
+    if label_columns:
+        logger.info(
+            "Waterfall chart cache update: label columns found %s",
+            {idx: str(value) for idx, value in label_columns.items()},
+        )
     categories_values = ["" if value is None else str(value) for value in categories]
     categories_count = len(categories_values)
     logger.info("Waterfall chart cache update: %s category points", categories_count)
@@ -1376,6 +1485,7 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
 
     label_cache_updates = 0
     label_cache_missing = 0
+    c15_label_updates = 0
     series_label_refs = []
     for idx, ser in enumerate(root.findall(".//c:ser", namespaces=nsmap), start=1):
         series_label = series_names[idx - 1] if idx - 1 < len(series_names) else f"Series {idx}"
@@ -1411,83 +1521,208 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
                 continue
             seen_refs.add(id(ref))
             deduped_refs.append(ref)
-        if not deduped_refs:
-            continue
         labs_column = None
         if chart_series is not None and _is_positive_series(chart_series):
             labs_column = _find_header_column(ws, ["labs-Positives"])
         elif chart_series is not None and _is_negative_series(chart_series):
             labs_column = _find_header_column(ws, ["labs-Negatives"])
+        if labs_column is None:
+            series_label_text = str(series_label).lower()
+            if "positive" in series_label_text:
+                labs_column = _find_header_column(ws, ["labs-Positives"])
+            elif "negative" in series_label_text:
+                labs_column = _find_header_column(ws, ["labs-Negatives"])
+        if labs_column is None:
+            positive_col = _find_header_column(ws, ["labs-Positives"])
+            negative_col = _find_header_column(ws, ["labs-Negatives"])
+            if positive_col and not negative_col:
+                labs_column = positive_col
+            elif negative_col and not positive_col:
+                labs_column = negative_col
+        if labs_column is None:
+            labs_candidates = []
+            for col_idx in range(1, ws.max_column + 1):
+                header = ws.cell(row=1, column=col_idx).value
+                if header is None:
+                    continue
+                header_text = _normalize_column_name(str(header))
+                if header_text.startswith("labs"):
+                    labs_candidates.append(col_idx)
+            if len(labs_candidates) == 1:
+                labs_column = labs_candidates[0]
         if chart_series is not None and labs_column is None:
             logger.info(
                 "Waterfall chart cache update: series %s data label column missing for labs",
                 series_label,
             )
-        for ref_node in deduped_refs:
-            f_node = ref_node.find("c:f", namespaces=nsmap)
-            if f_node is None or not f_node.text:
+        bounds = series_category_bounds.get(idx) or series_value_bounds.get(idx)
+        if bounds:
+            min_row, max_row, sheet_name = bounds
+        else:
+            value_formula_node = ser.find("c:val/c:numRef/c:f", namespaces=nsmap)
+            min_row = max_row = None
+            sheet_name = None
+            if value_formula_node is not None and value_formula_node.text:
+                value_bounds = _range_boundaries_from_formula(value_formula_node.text)
+                if value_bounds:
+                    _, min_row, _, max_row = value_bounds
+                    _, _, sheet_name = _worksheet_and_range_from_formula(
+                        workbook, value_formula_node.text
+                    )
+        c15_updated = False
+        if deduped_refs:
+            for ref_node in deduped_refs:
+                f_node = ref_node.find("c:f", namespaces=nsmap)
+                if f_node is None or not f_node.text:
+                    logger.info(
+                        "Waterfall chart cache update: series %s data label ref formula missing",
+                        series_label,
+                    )
+                    continue
                 logger.info(
-                    "Waterfall chart cache update: series %s data label ref formula missing",
+                    "Waterfall chart cache update: series %s data label ref formula %s",
+                    series_label,
+                    f_node.text,
+                )
+                expected_formula = None
+                formula_bounds = _range_boundaries_from_formula(f_node.text)
+                formula_col = formula_bounds[0] if formula_bounds else None
+                if labs_column:
+                    if min_row is not None and max_row is not None:
+                        expected_formula = _build_cell_range_formula(
+                            sheet_name,
+                            labs_column,
+                            min_row,
+                            max_row,
+                        )
+                        if (
+                            f_node.text != expected_formula
+                            and formula_col not in label_columns
+                        ):
+                            f_node.text = expected_formula
+                label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
+                    workbook, f_node.text
+                )
+                label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
+                label_values = _flatten_cell_values(label_rows)
+                if _all_blank(label_values):
+                    raise ValueError(
+                        f"Chart cache: data label range '{f_node.text}' for series '{series_label}' is blank."
+                    )
+                series_points = series_point_counts.get(idx, len(label_values))
+                if len(label_values) < series_points:
+                    label_values += ["" for _ in range(series_points - len(label_values))]
+                elif len(label_values) > series_points:
+                    label_values = label_values[:series_points]
+                str_cache, created = _ensure_str_cache(ref_node)
+                if created:
+                    label_cache_missing += 1
+                _update_str_cache(
+                    str_cache,
+                    ["" if value is None else str(value) for value in label_values],
+                )
+                label_cache_updates += 1
+                if not c15_updated:
+                    d_lbls_node = ref_node
+                    while d_lbls_node is not None and not d_lbls_node.tag.endswith("dLbls"):
+                        d_lbls_node = d_lbls_node.getparent()
+                    c15_container = d_lbls_node if d_lbls_node is not None else ser
+                    c15_label_updates += _update_c15_label_range_cache(
+                        c15_container,
+                        expected_formula or f_node.text,
+                        ["" if value is None else str(value) for value in label_values],
+                        nsmap,
+                        f"series {series_label}",
+                    )
+                    c15_updated = True
+                logger.info(
+                    "Waterfall chart cache update: series %s cached %s data label points",
+                    series_label,
+                    len(label_values),
+                )
+                if expected_formula:
+                    logger.info(
+                        "Waterfall chart cache update: series %s data label ref updated to %s",
+                        series_label,
+                        expected_formula,
+                    )
+                logger.info(
+                    "Waterfall chart cache update: series %s data label formula %s cached %s points",
+                    series_label,
+                    f_node.text,
+                    len(label_values),
+                )
+        if not deduped_refs:
+            c15_ranges = ser.findall(".//c15:datalabelsRange", namespaces=nsmap)
+            if not c15_ranges:
+                try:
+                    c15_ranges = ser.xpath(".//*[local-name()='datalabelsRange']")
+                except Exception:
+                    c15_ranges = []
+            if c15_ranges:
+                logger.info(
+                    "Waterfall chart cache update: series %s c15 label ranges found without c:strRef",
                     series_label,
                 )
-                continue
-            logger.info(
-                "Waterfall chart cache update: series %s data label ref formula %s",
-                series_label,
-                f_node.text,
-            )
-            expected_formula = None
-            if labs_column:
-                bounds = series_category_bounds.get(idx) or series_value_bounds.get(idx)
-                if bounds:
-                    min_row, max_row, sheet_name = bounds
+            for c15_range in c15_ranges:
+                c15_formula_node = c15_range.find("c15:f", namespaces=nsmap)
+                if c15_formula_node is None:
+                    try:
+                        c15_formula_node = c15_range.xpath("./*[local-name()='f']")[0]
+                    except Exception:
+                        c15_formula_node = None
+                if c15_formula_node is None or not c15_formula_node.text:
+                    logger.info(
+                        "Waterfall chart cache update: series %s c15 label formula missing",
+                        series_label,
+                    )
+                    continue
+                expected_formula = None
+                formula_bounds = _range_boundaries_from_formula(c15_formula_node.text)
+                formula_col = formula_bounds[0] if formula_bounds else None
+                if labs_column and min_row is not None and max_row is not None:
                     expected_formula = _build_cell_range_formula(
                         sheet_name,
                         labs_column,
                         min_row,
                         max_row,
                     )
-                    if f_node.text != expected_formula:
-                        f_node.text = expected_formula
-            label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
-                workbook, f_node.text
-            )
-            label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
-            label_values = _flatten_cell_values(label_rows)
-            if _all_blank(label_values):
-                raise ValueError(
-                    f"Chart cache: data label range '{f_node.text}' for series '{series_label}' is blank."
+                elif labs_column:
+                    series_points = series_point_counts.get(idx)
+                    if series_points:
+                        expected_formula = _build_cell_range_formula(
+                            sheet_name or ws.title,
+                            labs_column,
+                            2,
+                            1 + series_points,
+                        )
+                if (
+                    expected_formula
+                    and c15_formula_node.text != expected_formula
+                    and formula_col not in label_columns
+                ):
+                    c15_formula_node.text = expected_formula
+                label_ws, label_ref_range, _ = _worksheet_and_range_from_formula(
+                    workbook, c15_formula_node.text
                 )
-            series_points = series_point_counts.get(idx, len(label_values))
-            if len(label_values) < series_points:
-                label_values += ["" for _ in range(series_points - len(label_values))]
-            elif len(label_values) > series_points:
-                label_values = label_values[:series_points]
-            str_cache, created = _ensure_str_cache(ref_node)
-            if created:
-                label_cache_missing += 1
-            _update_str_cache(
-                str_cache,
-                ["" if value is None else str(value) for value in label_values],
-            )
-            label_cache_updates += 1
-            logger.info(
-                "Waterfall chart cache update: series %s cached %s data label points",
-                series_label,
-                len(label_values),
-            )
-            if expected_formula:
-                logger.info(
-                    "Waterfall chart cache update: series %s data label ref updated to %s",
-                    series_label,
-                    expected_formula,
+                label_rows = _range_values_from_worksheet(label_ws, label_ref_range)
+                label_values = _flatten_cell_values(label_rows)
+                if _all_blank(label_values):
+                    raise ValueError(
+                        f"Chart cache: data label range '{c15_formula_node.text}' for series '{series_label}' is blank."
+                    )
+                series_points = series_point_counts.get(idx, len(label_values))
+                if len(label_values) < series_points:
+                    label_values += ["" for _ in range(series_points - len(label_values))]
+                elif len(label_values) > series_points:
+                    label_values = label_values[:series_points]
+                c15_label_updates += _update_c15_label_range_cache(
+                    c15_range,
+                    expected_formula or c15_formula_node.text,
+                    ["" if value is None else str(value) for value in label_values],
+                    nsmap,
+                    f"series {series_label}",
                 )
-            logger.info(
-                "Waterfall chart cache update: series %s data label formula %s cached %s points",
-                series_label,
-                f_node.text,
-                len(label_values),
-            )
     for ref_node in plot_only_refs:
         f_node = ref_node.find("c:f", namespaces=nsmap)
         if f_node is None or not f_node.text:
@@ -1521,6 +1756,17 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
             ["" if value is None else str(value) for value in label_values],
         )
         label_cache_updates += 1
+        d_lbls_node = ref_node
+        while d_lbls_node is not None and not d_lbls_node.tag.endswith("dLbls"):
+            d_lbls_node = d_lbls_node.getparent()
+        if d_lbls_node is not None:
+            c15_label_updates += _update_c15_label_range_cache(
+                d_lbls_node,
+                f_node.text,
+                ["" if value is None else str(value) for value in label_values],
+                nsmap,
+                "plot-level",
+            )
         logger.info(
             "Waterfall chart cache update: plot-level cached %s data label points",
             len(label_values),
@@ -1534,6 +1780,11 @@ def _update_waterfall_chart_caches(chart, workbook, categories: list[str]) -> No
         logger.info(
             "Waterfall chart cache update: %s data label caches updated",
             label_cache_updates,
+        )
+    if c15_label_updates:
+        logger.info(
+            "Waterfall chart cache update: %s c15 label-range caches updated",
+            c15_label_updates,
         )
     elif label_cache_missing:
         logger.info(
