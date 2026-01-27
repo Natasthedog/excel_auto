@@ -3490,34 +3490,47 @@ def _update_waterfall_chart(
     target_level_label: str | None,
     bucket_data: dict | None,
 ) -> None:
-    chart = _waterfall_chart_from_slide(slide, "Waterfall Template")
-    if chart is None:
+    chart_shapes = [shape for shape in slide.shapes if shape.has_chart]
+    if not chart_shapes:
         raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
-    series_names = [series.name for series in chart.series]
-    label_columns = _capture_label_columns(_load_chart_workbook(chart).active, series_names)
-    cd, categories, base_indices, base_values, _ = _build_waterfall_chart_data(
-        chart,
-        scope_df,
-        gathered_df,
-        target_level_label,
-        bucket_data.get("labels") if bucket_data else None,
-        bucket_data.get("values") if bucket_data else None,
-    )
-    chart.replace_data(cd)
-    updated_wb = _load_chart_workbook(chart)
-    total_rows = len(categories)
-    _update_lab_base_label(
-        label_columns,
-        base_indices,
-        base_values,
-        total_rows,
-    )
-    _apply_label_columns(updated_wb.active, label_columns, total_rows)
-    _ensure_negatives_column_positive(updated_wb.active)
-    _update_all_waterfall_labs(updated_wb.active, base_indices, base_values)
-    _save_chart_workbook(chart, updated_wb)
-    _update_waterfall_chart_caches(chart, updated_wb, categories)
-    _update_waterfall_yoy_arrows(slide, base_values)
+    last_base_values: tuple[float, float] | None = None
+    for chart_shape in chart_shapes:
+        chart = chart_shape.chart
+        series_names = [series.name for series in chart.series]
+        label_columns = _capture_label_columns(_load_chart_workbook(chart).active, series_names)
+        cd, categories, base_indices, base_values, _ = _build_waterfall_chart_data(
+            chart,
+            scope_df,
+            gathered_df,
+            target_level_label,
+            bucket_data.get("labels") if bucket_data else None,
+            bucket_data.get("values") if bucket_data else None,
+        )
+        chart.replace_data(cd)
+        updated_wb = _load_chart_workbook(chart)
+        total_rows = len(categories)
+        _update_lab_base_label(
+            label_columns,
+            base_indices,
+            base_values,
+            total_rows,
+        )
+        _apply_label_columns(updated_wb.active, label_columns, total_rows)
+        _ensure_negatives_column_positive(updated_wb.active)
+        _update_all_waterfall_labs(updated_wb.active, base_indices, base_values)
+        _save_chart_workbook(chart, updated_wb)
+        chart_type = getattr(
+            chart,
+            "chart_type",
+            getattr(XL_CHART_TYPE, "WATERFALL", XL_CHART_TYPE.COLUMN_STACKED),
+        )
+        if chart_type == getattr(XL_CHART_TYPE, "WATERFALL", XL_CHART_TYPE.COLUMN_STACKED):
+            _update_waterfall_chart_caches(chart, updated_wb, categories)
+        else:
+            _update_chart_label_caches(chart, updated_wb)
+        if base_values is not None:
+            last_base_values = base_values
+    _update_waterfall_yoy_arrows(slide, last_base_values)
 
 
 def _resolve_target_level_label_value(
