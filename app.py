@@ -30,6 +30,9 @@ from pptx.util import Inches
 from pptx.enum.text import PP_ALIGN
 from pptx.chart.data import ChartData
 from pptx.enum.chart import XL_CHART_TYPE
+from pptx.oxml.ns import qn
+from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+from pptx.parts.embeddedpackage import EmbeddedXlsxPart
 from lxml import etree
 
 app = Dash(__name__)
@@ -3083,6 +3086,38 @@ def _waterfall_chart_shape_from_slide(slide, chart_name: str):
     return None
 
 
+def _clone_chart_part(chart_part):
+    package = chart_part.package
+    new_partname = package.next_partname(chart_part.partname_template)
+    new_chart_part = chart_part.__class__.load(
+        new_partname,
+        chart_part.content_type,
+        package,
+        chart_part.blob,
+    )
+    xlsx_part = chart_part.chart_workbook.xlsx_part
+    if xlsx_part is not None:
+        new_xlsx_part = EmbeddedXlsxPart.new(xlsx_part.blob, package)
+        new_chart_part.chart_workbook.xlsx_part = new_xlsx_part
+    return new_chart_part
+
+
+def _ensure_unique_chart_parts_on_slide(slide, seen_partnames: set[str]) -> None:
+    for shape in slide.shapes:
+        if not shape.has_chart:
+            continue
+        chart_part = shape.chart.part
+        partname = str(chart_part.partname)
+        if partname in seen_partnames:
+            new_chart_part = _clone_chart_part(chart_part)
+            new_rid = shape.part.relate_to(new_chart_part, RT.CHART)
+            chart_element = shape._element.graphic.graphicData.chart
+            chart_element.set(qn("r:id"), new_rid)
+            chart_part = shape.chart.part
+            partname = str(chart_part.partname)
+        seen_partnames.add(partname)
+
+
 def _categories_from_chart(chart) -> list[str]:
     categories = []
     try:
@@ -3557,8 +3592,10 @@ def populate_category_waterfall(
             )
         )
 
+    seen_partnames: set[str] = set()
     for idx, label in enumerate(labels):
         marker_text, slide = available_slides[idx]
+        _ensure_unique_chart_parts_on_slide(slide, seen_partnames)
         _update_waterfall_axis_placeholders(
             prs,
             slide,
