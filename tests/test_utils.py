@@ -42,7 +42,7 @@ def _add_textbox(slide, name: str, text: str, top_offset: float) -> None:
     textbox.text = text
 
 
-def _add_waterfall_chart(slide) -> None:
+def _add_waterfall_chart(slide, left_offset: float = 0.0) -> None:
     chart_data = ChartData()
     chart_data.categories = ["Base", "Change", "Total"]
     chart_data.add_series("Base", (100, 0, 110))
@@ -52,7 +52,7 @@ def _add_waterfall_chart(slide) -> None:
     chart_type = getattr(XL_CHART_TYPE, "WATERFALL", XL_CHART_TYPE.COLUMN_STACKED)
     chart_shape = slide.shapes.add_chart(
         chart_type,
-        Inches(0.8),
+        Inches(0.8 + left_offset),
         Inches(2.2),
         Inches(8.5),
         Inches(3.5),
@@ -66,7 +66,11 @@ def _add_waterfall_chart(slide) -> None:
     plot.data_labels.show_category_name = True
 
 
-def build_test_template(path: Path, waterfall_slide_count: int) -> None:
+def build_test_template(
+    path: Path,
+    waterfall_slide_count: int,
+    waterfall_chart_count: int = 1,
+) -> None:
     prs = Presentation()
     blank_layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[0]
 
@@ -86,7 +90,8 @@ def build_test_template(path: Path, waterfall_slide_count: int) -> None:
         _add_textbox(slide, f"WaterfallModelled{idx + 1}", "Modelled in: <modelled in>", 1.4)
         _add_textbox(slide, f"WaterfallMetric{idx + 1}", "Metric: <metric>", 1.9)
         _add_textbox(slide, f"WaterfallStyle{idx + 1}", f"Template Style {idx + 1}", 6.1)
-        _add_waterfall_chart(slide)
+        for chart_idx in range(waterfall_chart_count):
+            _add_waterfall_chart(slide, left_offset=9.2 * chart_idx)
 
     prs.save(path)
 
