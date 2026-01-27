@@ -14,9 +14,23 @@ If a ticket requires changing existing behavior, it must say so explicitly.
 - Users must NOT be forced to select “every Target Level Label filter” (or equivalent) to run.
 - “No selection” should produce a sensible default behavior (e.g., include all / don’t filter), consistent with current app behavior.
 
-### B) Waterfall chart labels (MUST NOT CHANGE)
-- Waterfall labels must render correctly **without** the user needing to open PowerPoint’s “Edit Data”.
+### B) Chart label rendering (ALL charts) (MUST NOT CHANGE)
+- Chart labels must render correctly **on first open** in PowerPoint (no manual “Edit Data” workaround).
 - Any change that touches charts must preserve the chart label-cache refresh behavior.
+
+#### Hard invariant (applies to ALL charts)
+Any time you call `chart.replace_data(...)`, you MUST, in the same code path:
+1) Load the embedded workbook (`_load_chart_workbook(chart)`)
+2) Apply any required sheet changes
+3) Save the workbook back (`_save_chart_workbook(chart, wb)`)
+4) Refresh label caches:
+   - Standard charts: `_update_chart_label_caches(chart, wb)`
+   - Waterfall charts / “Values from Cells”: `_update_waterfall_chart_caches(chart, wb, categories)`
+
+#### Do-not-break rules
+- Do not remove/rename/bypass the cache-refresh helpers without updating **all** call-sites + tests.
+- When adding a new chart type, you must ensure it follows the invariant and add regression coverage.
+
 
 ---
 
@@ -74,9 +88,22 @@ Minimum expectation:
 - Test that on initial load, all relevant filters are empty/deselected.
 - Test that running with “no Target Level Label selected” still produces output (or uses default behavior) and does not error.
 
-### 2) Waterfall label rendering test (protects Approved B)
+### 2) Chart label rendering tests (protects Approved B)
+These tests are non-negotiable — do not weaken or remove them.
+
+**2a) Static “tripwire” test**
+- Scan the codebase for `replace_data(` call-sites and assert each is followed by a cache refresh call:
+  - `_update_chart_label_caches(` OR `_update_waterfall_chart_caches(`
+- If a new call-site fails this rule, fix the implementation (do NOT relax the test).
+
+**2b) Integration “golden” XML cache test**
 - Generate a deck and verify chart XML contains label settings and caches such that labels render without opening “Edit Data”.
-- This should be a “golden” assertion against the produced `.pptx` contents (zip + inspect `ppt/charts/chart*.xml`).
+- This should be a “golden” assertion against the produced `.pptx` contents (zip + inspect `ppt/charts/chart*.xml`):
+  - `c:strCache` exists with a non-zero `c:ptCount` where labels are referenced.
+  - For “Values from Cells” (Office 2013+), `c15:datalabelsRange` includes a populated `c15:dlblRangeCache`.
+
+
+
 
 ### 3) Placeholder population tests
 - Verify the text placeholders like:
