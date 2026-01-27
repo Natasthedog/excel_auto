@@ -102,6 +102,7 @@ def build_deck_bytes(
     waterfall_targets: list[str] | None,
     modelled_in_value: str = "US",
     metric_value: str = "Units",
+    bucket_data: dict | None = None,
 ) -> bytes:
     return build_pptx_from_template(
         template_path.read_bytes(),
@@ -111,7 +112,7 @@ def build_deck_bytes(
         scope_df=None,
         product_description_df=None,
         waterfall_targets=waterfall_targets,
-        bucket_data=None,
+        bucket_data=bucket_data,
         modelled_in_value=modelled_in_value,
         metric_value=metric_value,
     )

@@ -610,14 +610,16 @@ def _target_level_labels_from_gathered_df(gathered_df: pd.DataFrame) -> list[str
 def _target_level_label_column_exact(gathered_df: pd.DataFrame) -> tuple[str | None, int]:
     if gathered_df is None or gathered_df.empty:
         return None, 0
-    if "Target Level Label" in gathered_df.columns:
-        return "Target Level Label", 0
+    column = _find_column_by_candidates(
+        gathered_df,
+        ["Target Level Label", "Target Level"],
+    )
+    if column:
+        return column, 0
     header_row = gathered_df.iloc[0]
-    for column, value in header_row.items():
-        if pd.isna(value):
-            continue
-        if str(value).strip() == "Target Level Label":
-            return column, 1
+    column = _find_column_by_row_values(header_row, ["Target Level Label", "Target Level"])
+    if column:
+        return column, 1
     return None, 0
 
 
@@ -907,7 +909,7 @@ def _compute_bucket_deltas_by_column(
 
 def _resolve_base_value_columns(gathered_df: pd.DataFrame) -> tuple[dict, int]:
     column_candidates = {
-        "target_level": ["Target Level Label", "Target Level", "Target Label"],
+        "target_level": ["Target Level Label", "Target Level"],
         "target_label": ["Target Label", "Target", "Target Type"],
         "year": ["Year", "Model Year"],
         "actuals": ["Actuals", "Actual"],
@@ -927,12 +929,27 @@ def _resolve_base_value_columns(gathered_df: pd.DataFrame) -> tuple[dict, int]:
                 f"{' / '.join(candidates)} column needed for the waterfall base."
             )
         columns[key] = column
+    if columns["target_level"] == columns["target_label"]:
+        alt_candidates = ["Target Level Label", "Target Level"]
+        column = _find_column_by_candidates(gathered_df, alt_candidates)
+        if not column and header_row is not None:
+            column = _find_column_by_row_values(header_row, alt_candidates)
+            if column:
+                data_start_idx = 1
+        if column and column != columns["target_label"]:
+            columns["target_level"] = column
+        else:
+            raise ValueError(
+                "The gatheredCN10 file needs separate Target Level Label and Target Label columns."
+            )
     return columns, data_start_idx
 
 
 def _waterfall_base_values(
     gathered_df: pd.DataFrame,
     target_level_label: str,
+    year1: str | None = None,
+    year2: str | None = None,
 ) -> tuple[float, float]:
     if gathered_df is None or gathered_df.empty:
         raise ValueError("The gatheredCN10 file is empty.")
@@ -944,8 +961,10 @@ def _waterfall_base_values(
     year_series = data_df[columns["year"]].map(_normalize_text_value)
     actuals = pd.to_numeric(data_df[columns["actuals"]], errors="coerce").fillna(0)
     base_filter = (target_level_series == target_level) & (target_label_series == "own")
-    year1_total = actuals[base_filter & (year_series == "year1")].sum()
-    year2_total = actuals[base_filter & (year_series == "year2")].sum()
+    normalized_year1 = _normalize_text_value(year1) if year1 is not None else "year1"
+    normalized_year2 = _normalize_text_value(year2) if year2 is not None else "year2"
+    year1_total = actuals[base_filter & (year_series == normalized_year1)].sum()
+    year2_total = actuals[base_filter & (year_series == normalized_year2)].sum()
     return year1_total, year2_total
 
 
@@ -3250,6 +3269,8 @@ def _build_waterfall_chart_data(
     target_level_label: str | None = None,
     bucket_labels: list[str] | None = None,
     bucket_values: list[float] | None = None,
+    year1: str | None = None,
+    year2: str | None = None,
 ) -> tuple[
     ChartData,
     list[str],
@@ -3280,7 +3301,12 @@ def _build_waterfall_chart_data(
         and target_level_label
         and base_indices is not None
     ):
-        base_values = _waterfall_base_values(gathered_df, target_level_label)
+        base_values = _waterfall_base_values(
+            gathered_df,
+            target_level_label,
+            year1=year1,
+            year2=year2,
+        )
     cd = ChartData()
     cd.categories = categories
     base_start_value = None
@@ -3391,6 +3417,8 @@ def _add_waterfall_chart_from_template(
         target_level_label,
         bucket_data.get("labels") if bucket_data else None,
         bucket_data.get("values") if bucket_data else None,
+        year1=bucket_data.get("year1") if bucket_data else None,
+        year2=bucket_data.get("year2") if bucket_data else None,
     )
     chart_type = getattr(
         template_chart,
@@ -3505,6 +3533,8 @@ def _update_waterfall_chart(
             target_level_label,
             bucket_data.get("labels") if bucket_data else None,
             bucket_data.get("values") if bucket_data else None,
+            year1=bucket_data.get("year1") if bucket_data else None,
+            year2=bucket_data.get("year2") if bucket_data else None,
         )
         chart.replace_data(cd)
         updated_wb = _load_chart_workbook(chart)
