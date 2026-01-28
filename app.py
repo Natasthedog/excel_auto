@@ -517,11 +517,19 @@ def _find_slide_by_marker(prs, marker_text: str):
     return None
 
 
-def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
-    vars_col = _find_column_by_candidates(
+def _build_category_waterfall_df(
+    gathered_df: pd.DataFrame,
+    target_level_label: str | None = None,
+) -> pd.DataFrame:
+    header_row = gathered_df.iloc[0] if len(gathered_df) else None
+    data_start_idx = 0
+    vars_col, vars_idx, _ = _resolve_column_from_candidates(
         gathered_df,
+        header_row,
         ["Vars", "Var", "Variable", "Variable Name", "Bucket", "Driver"],
+        context="Vars/Variable",
     )
+    data_start_idx = max(data_start_idx, vars_idx)
     if not vars_col:
         raise ValueError("The gatheredCN10 file is missing a Vars/Variable column for the waterfall.")
 
@@ -536,11 +544,17 @@ def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
     series_columns = {}
     missing = []
     for key, candidates in series_candidates.items():
-        found = _find_column_by_candidates(gathered_df, candidates)
+        found, found_idx, _ = _resolve_column_from_candidates(
+            gathered_df,
+            header_row,
+            candidates,
+            context=key,
+        )
         if not found:
             missing.append(key)
         else:
             series_columns[key] = found
+            data_start_idx = max(data_start_idx, found_idx)
     if missing:
         raise ValueError(
             "The gatheredCN10 file is missing waterfall columns: "
@@ -567,13 +581,34 @@ def _build_category_waterfall_df(gathered_df: pd.DataFrame) -> pd.DataFrame:
     }
     label_columns = {}
     for key, candidates in label_candidates.items():
-        found = _find_column_by_candidates(gathered_df, candidates)
+        found, found_idx, _ = _resolve_column_from_candidates(
+            gathered_df,
+            header_row,
+            candidates,
+            context=key,
+        )
         if found:
             label_columns[key] = found
+            data_start_idx = max(data_start_idx, found_idx)
+
+    data_df = gathered_df.iloc[data_start_idx:].copy()
+    if target_level_label:
+        target_col, target_idx, _ = _resolve_column_from_candidates(
+            gathered_df,
+            header_row,
+            ["Target Level Label", "Target Level"],
+            context="Target Level Label",
+        )
+        if target_col:
+            data_start_idx = max(data_start_idx, target_idx)
+            data_df = gathered_df.iloc[data_start_idx:].copy()
+            normalized_target = _normalize_text_value(target_level_label)
+            target_series = data_df[target_col].map(_normalize_text_value)
+            data_df = data_df[target_series == normalized_target]
 
     ordered_cols = [vars_col] + [series_columns[key] for key in series_candidates]
     ordered_cols += list(label_columns.values())
-    waterfall_df = gathered_df.loc[:, ordered_cols].copy()
+    waterfall_df = data_df.loc[:, ordered_cols].copy()
     rename_map = {vars_col: "Vars", **{v: k for k, v in series_columns.items()}}
     rename_map.update({v: k for k, v in label_columns.items()})
     waterfall_df = waterfall_df.rename(columns=rename_map)
@@ -696,6 +731,91 @@ def _normalize_lookup_value(value: str) -> str:
 
 def _format_fuzzy_candidates(candidates: list[tuple[float, str]]) -> str:
     return ", ".join(f"{label!r} ({score:.1f})" for score, label in candidates)
+
+
+def _resolve_column_from_candidates(
+    df: pd.DataFrame,
+    header_row: pd.Series | None,
+    candidates: list[str],
+    *,
+    context: str,
+    threshold: float = 85.0,
+) -> tuple[str | None, int, float]:
+    column_options: list[tuple[str, object, int]] = []
+    for column in df.columns:
+        column_options.append((str(column), column, 0))
+    if header_row is not None:
+        for column, value in header_row.items():
+            if pd.isna(value):
+                continue
+            column_options.append((str(value), column, 1))
+
+    normalized_candidates = [
+        (candidate, _normalize_lookup_value(candidate)) for candidate in candidates
+    ]
+    normalized_options = [
+        (label, _normalize_lookup_value(label), column, data_start_idx)
+        for label, column, data_start_idx in column_options
+        if _normalize_lookup_value(label)
+    ]
+
+    exact_matches = []
+    for candidate, normalized_candidate in normalized_candidates:
+        for label, normalized_label, column, data_start_idx in normalized_options:
+            if normalized_candidate == normalized_label:
+                exact_matches.append((candidate, label, column, data_start_idx, 100.0))
+    if exact_matches:
+        unique_columns = {match[2] for match in exact_matches}
+        if len(unique_columns) > 1:
+            top_candidates = [
+                (match[4], match[1]) for match in exact_matches[:5]
+            ]
+            raise ValueError(
+                f"Ambiguous {context} match. Top candidates: "
+                f"{_format_fuzzy_candidates(top_candidates)}"
+            )
+        candidate, label, column, data_start_idx, score = exact_matches[0]
+        logger.info(
+            'Resolved header "%s" -> "%s" (score %.1f)',
+            candidate,
+            label,
+            score,
+        )
+        return column, data_start_idx, score
+
+    from difflib import SequenceMatcher
+
+    scored: list[tuple[float, str, object, int, str]] = []
+    for candidate, normalized_candidate in normalized_candidates:
+        for label, normalized_label, column, data_start_idx in normalized_options:
+            score = SequenceMatcher(None, normalized_candidate, normalized_label).ratio() * 100
+            scored.append((score, label, column, data_start_idx, candidate))
+    if not scored:
+        return None, 0, 0.0
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top_score = scored[0][0]
+    if top_score < threshold:
+        return None, 0, top_score
+    close_matches = [
+        (score, label, column)
+        for score, label, column, _, _ in scored
+        if score >= top_score - 1.0
+    ]
+    unique_columns = {column for _, _, column in close_matches}
+    if len(unique_columns) > 1:
+        top_candidates = [(score, label) for score, label, _ in close_matches[:5]]
+        raise ValueError(
+            f"Ambiguous {context} match. Top candidates: "
+            f"{_format_fuzzy_candidates(top_candidates)}"
+        )
+    score, label, column, data_start_idx, candidate = scored[0]
+    logger.info(
+        'Resolved header "%s" -> "%s" (score %.1f)',
+        candidate,
+        label,
+        score,
+    )
+    return column, data_start_idx, score
 
 
 def _resolve_label_from_text(text: str, labels: list[str], threshold: float = 85.0) -> str:
@@ -3482,6 +3602,48 @@ def _bucket_blank_values(bucket_values: list[float], base_value: float) -> list[
     return blanks
 
 
+def _align_series_values(values: list[float], total_count: int) -> list[float]:
+    if total_count <= 0:
+        return values
+    if len(values) < total_count:
+        return values + [0.0] * (total_count - len(values))
+    if len(values) > total_count:
+        return values[:total_count]
+    return values
+
+
+def _waterfall_series_from_gathered_df(
+    gathered_df: pd.DataFrame,
+    scope_df: pd.DataFrame | None,
+    target_level_label: str,
+) -> tuple[list[str], dict[str, list[float]]] | None:
+    waterfall_df = _build_category_waterfall_df(
+        gathered_df,
+        target_level_label=target_level_label,
+    )
+    if waterfall_df.empty:
+        return None
+    categories = (
+        waterfall_df["Vars"]
+        .fillna("")
+        .astype(str)
+        .tolist()
+    )
+    categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
+    series_values = {}
+    for key in ["Base", "Promo", "Media", "Blanks", "Positives", "Negatives"]:
+        if key in waterfall_df.columns:
+            series_values[key] = (
+                pd.to_numeric(waterfall_df[key], errors="coerce")
+                .fillna(0)
+                .astype(float)
+                .tolist()
+            )
+    if not series_values:
+        return None
+    return categories, series_values
+
+
 def _build_waterfall_chart_data(
     chart,
     scope_df: pd.DataFrame | None,
@@ -3498,9 +3660,28 @@ def _build_waterfall_chart_data(
     tuple[float, float] | None,
     list[tuple[str, list[float]]],
 ]:
-    categories = _categories_from_chart(chart)
+    gathered_override = None
+    if gathered_df is not None and target_level_label:
+        try:
+            gathered_override = _waterfall_series_from_gathered_df(
+                gathered_df,
+                scope_df,
+                target_level_label,
+            )
+        except Exception as exc:
+            logger.info(
+                "Skipping gatheredCN10 waterfall data for %r: %s",
+                target_level_label,
+                exc,
+            )
+            gathered_override = None
+    if gathered_override is not None:
+        categories, gathered_series = gathered_override
+    else:
+        categories = _categories_from_chart(chart)
+        gathered_series = {}
+        categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
     base_indices = _waterfall_base_indices(categories)
-    categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
     original_base_indices = base_indices
     bucket_labels = list(bucket_labels or [])
     bucket_values = [float(value) for value in (bucket_values or [])]
@@ -3549,9 +3730,26 @@ def _build_waterfall_chart_data(
         positive_bucket_values, negative_bucket_values = _bucket_value_split(bucket_values)
         blank_bucket_values = _bucket_blank_values(bucket_values, base_start_value)
 
+    series_candidates = list(gathered_series.keys())
     series_values: list[tuple[str, list[float]]] = []
     for series in chart.series:
         values = list(series.values)
+        if gathered_series:
+            resolved_series = None
+            try:
+                resolved_series = _resolve_label_from_text(
+                    str(series.name),
+                    series_candidates,
+                )
+            except Exception as exc:
+                logger.info(
+                    "No gatheredCN10 series match for %r: %s",
+                    series.name,
+                    exc,
+                )
+            if resolved_series:
+                values = list(gathered_series.get(resolved_series, values))
+                values = _align_series_values(values, len(categories))
         if original_base_indices and bucket_labels:
             if _is_positive_series(series):
                 if positive_bucket_values:
