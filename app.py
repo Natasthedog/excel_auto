@@ -752,7 +752,6 @@ def _parse_two_row_header_dataframe(
         )
 
     target_label_id = None
-    target_level_id = None
     year_id = None
     for column in columns_meta:
         if target_label_id is None and _two_row_column_match(
@@ -761,12 +760,6 @@ def _parse_two_row_header_dataframe(
             ["Target Label"],
         ):
             target_label_id = column["id"]
-        if target_level_id is None and _two_row_column_match(
-            column["group"],
-            column["subheader"],
-            ["Target Level Label", "Target Level"],
-        ):
-            target_level_id = column["id"]
         if year_id is None and _two_row_column_match(
             column["group"],
             column["subheader"],
@@ -781,7 +774,6 @@ def _parse_two_row_header_dataframe(
         "groups": group_map,
         "group_order": group_order,
         "target_label_id": target_label_id,
-        "target_level_id": target_level_id,
         "year_id": year_id,
     }
     return data_df, metadata
@@ -812,14 +804,12 @@ def _compute_bucket_deltas(
     bucket_config: dict[str, dict[str, list[str]]],
     year1: str,
     year2: str,
-    target_level_label: str | None = None,
 ) -> list[tuple[str, float]]:
     """Compute Year2-Year1 deltas for each bucket group.
 
     bucket_config maps group -> {"target_labels": [...], "subheaders_included": [...]}
     """
     target_label_id = metadata.get("target_label_id")
-    target_level_id = metadata.get("target_level_id")
     year_id = metadata.get("year_id")
     if not target_label_id:
         raise ValueError("The gatheredCN10 file is missing the Target Label column.")
@@ -831,11 +821,6 @@ def _compute_bucket_deltas(
 
     target_series = data_df[target_label_id].map(_normalize_text_value)
     year_series = data_df[year_id].map(_normalize_text_value)
-    target_level_mask = pd.Series(True, index=data_df.index)
-    if target_level_label and target_level_id and target_level_id in data_df.columns:
-        normalized_target_level = _normalize_text_value(target_level_label)
-        target_level_series = data_df[target_level_id].map(_normalize_text_value)
-        target_level_mask = target_level_series == normalized_target_level
 
     deltas: list[tuple[str, float]] = []
     group_order = metadata.get("group_order", [])
@@ -876,8 +861,8 @@ def _compute_bucket_deltas(
                 deltas.append((f"{display_label} {group}", 0.0))
             continue
         values_df = data_df[selected_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-        year1_mask = (year_series == normalized_year1) & target_level_mask
-        year2_mask = (year_series == normalized_year2) & target_level_mask
+        year1_mask = year_series == normalized_year1
+        year2_mask = year_series == normalized_year2
         for label, normalized in target_label_sequence:
             target_mask = target_series == normalized
             year1_sum = values_df[year1_mask & target_mask].sum().sum()
@@ -3622,9 +3607,6 @@ def populate_category_waterfall(
     scope_df: pd.DataFrame | None = None,
     target_labels: list[str] | None = None,
     bucket_data: dict | None = None,
-    bucket_config: dict | None = None,
-    bucket_metadata: dict | None = None,
-    bucket_data_df: pd.DataFrame | None = None,
     modelled_in_value: str | None = None,
     metric_value: str | None = None,
 ):
@@ -3654,46 +3636,9 @@ def populate_category_waterfall(
         )
 
     seen_partnames: set[str] = set()
-    bucket_delta_cache: dict[str, dict] = {}
     for idx, label in enumerate(labels):
         marker_text, slide = available_slides[idx]
         _ensure_unique_chart_parts_on_slide(slide, seen_partnames)
-        bucket_data_for_label = bucket_data
-        if (
-            bucket_data
-            and bucket_config
-            and bucket_metadata
-            and bucket_data_df is not None
-        ):
-            cache_key = label
-            if cache_key in bucket_delta_cache:
-                bucket_data_for_label = bucket_delta_cache[cache_key]
-            else:
-                try:
-                    deltas = _compute_bucket_deltas(
-                        bucket_data_df,
-                        bucket_metadata,
-                        bucket_config,
-                        bucket_data.get("year1"),
-                        bucket_data.get("year2"),
-                        target_level_label=label,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to recompute bucket deltas for Target Level Label %s: %s",
-                        label,
-                        exc,
-                    )
-                else:
-                    labels_for_deltas = [group for group, _ in deltas]
-                    values_for_deltas = [value for _, value in deltas]
-                    bucket_data_for_label = {
-                        **bucket_data,
-                        "labels": labels_for_deltas,
-                        "values": values_for_deltas,
-                        "target_level_label": label,
-                    }
-                    bucket_delta_cache[cache_key] = bucket_data_for_label
         _update_waterfall_axis_placeholders(
             prs,
             slide,
@@ -3701,7 +3646,7 @@ def populate_category_waterfall(
             modelled_in_value=modelled_in_value,
             metric_value=metric_value,
         )
-        _update_waterfall_chart(slide, scope_df, gathered_df, label, bucket_data_for_label)
+        _update_waterfall_chart(slide, scope_df, gathered_df, label, bucket_data)
         _set_waterfall_slide_header(slide, label, marker_text=marker_text)
 
 def build_pptx_from_template(
@@ -3713,9 +3658,6 @@ def build_pptx_from_template(
     product_description_df=None,
     waterfall_targets=None,
     bucket_data=None,
-    bucket_config=None,
-    bucket_metadata=None,
-    bucket_data_df: pd.DataFrame | None = None,
     modelled_in_value: str | None = None,
     metric_value: str | None = None,
 ):
@@ -3798,9 +3740,6 @@ def build_pptx_from_template(
                 scope_df,
                 waterfall_targets,
                 bucket_data,
-                bucket_config,
-                bucket_metadata,
-                bucket_data_df,
                 modelled_in_value,
                 metric_value,
             )
@@ -4327,7 +4266,6 @@ def apply_bucket_selection(
     State("scope-upload", "filename"),
     State("project-select", "value"),
     State("waterfall-targets", "value"),
-    State("bucket-config", "data"),
     State("bucket-deltas", "data"),
     prevent_initial_call=True
 )
@@ -4339,7 +4277,6 @@ def generate_deck(
     scope_name,
     project_name,
     waterfall_targets,
-    bucket_config,
     bucket_data,
 ):
     if not data_contents or not project_name:
@@ -4355,14 +4292,6 @@ def generate_deck(
         project_details_df = None
         modelled_in_value = None
         metric_value = None
-        bucket_data_df = None
-        bucket_metadata = None
-        if bucket_data and bucket_config:
-            try:
-                raw_df = raw_df_from_contents(data_contents, data_name)
-                bucket_data_df, bucket_metadata = _parse_two_row_header_dataframe(raw_df)
-            except Exception as exc:
-                logger.warning("Failed to parse bucket data for waterfall deltas: %s", exc)
         if scope_contents:
             try:
                 scope_df = scope_df_from_contents(scope_contents, scope_name)
@@ -4414,9 +4343,6 @@ def generate_deck(
             product_description_df,
             waterfall_targets,
             bucket_data,
-            bucket_config,
-            bucket_metadata,
-            bucket_data_df,
             modelled_in_value,
             metric_value,
         )
