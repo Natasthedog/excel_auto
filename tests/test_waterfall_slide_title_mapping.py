@@ -1,37 +1,61 @@
 from __future__ import annotations
 
-import io
-import zipfile
+import pandas as pd
+from pptx import Presentation
+from pptx.enum.shapes import PP_PLACEHOLDER
 
-from test_utils import build_deck_bytes, build_sample_dataframe, build_test_template
-
-
-def _slide_with_text(zf: zipfile.ZipFile, text: str) -> str:
-    for name in zf.namelist():
-        if not name.startswith("ppt/slides/slide") or not name.endswith(".xml"):
-            continue
-        if text in zf.read(name).decode("utf-8", errors="ignore"):
-            return name
-    raise AssertionError(f"Slide containing {text!r} not found.")
+from app import _resolve_target_label_for_slide, _waterfall_base_values
 
 
-def test_waterfall_slide_titles_map_to_labels(tmp_path) -> None:
-    labels = ["Alpha", "Beta"]
-    titles = ["  beta ", "ALPHA"]
-    template_path = tmp_path / "template.pptx"
-    build_test_template(
-        template_path,
-        waterfall_slide_count=len(labels),
-        waterfall_titles=titles,
+def _make_slide_with_title(title_text: str):
+    prs = Presentation()
+    title_layout = None
+    for layout in prs.slide_layouts:
+        if any(
+            placeholder.placeholder_format.type == PP_PLACEHOLDER.TITLE
+            for placeholder in layout.placeholders
+        ):
+            title_layout = layout
+            break
+    if title_layout is None:
+        title_layout = prs.slide_layouts[0]
+    slide = prs.slides.add_slide(title_layout)
+    if slide.shapes.title is not None:
+        slide.shapes.title.text = title_text
+    return slide
+
+
+def test_resolve_target_label_from_slide_title() -> None:
+    slide = _make_slide_with_title("Competitor")
+    resolved = _resolve_target_label_for_slide(slide, ["Own", "Competitor"])
+    assert resolved == "Competitor"
+
+
+def test_waterfall_base_values_respect_target_label() -> None:
+    df = pd.DataFrame(
+        [
+            {"Target Level Label": "Alpha", "Target Label": "Own", "Year": "Year1", "Actuals": 10},
+            {"Target Level Label": "Alpha", "Target Label": "Own", "Year": "Year2", "Actuals": 20},
+            {
+                "Target Level Label": "Alpha",
+                "Target Label": "Cross",
+                "Year": "Year1",
+                "Actuals": 100,
+            },
+            {
+                "Target Level Label": "Alpha",
+                "Target Label": "Cross",
+                "Year": "Year2",
+                "Actuals": 150,
+            },
+        ]
     )
-
-    df = build_sample_dataframe(labels, include_brand=False)
-    pptx_bytes = build_deck_bytes(template_path, df, waterfall_targets=None)
-
-    with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as zf:
-        slide_one = _slide_with_text(zf, "Template Style 1")
-        slide_two = _slide_with_text(zf, "Template Style 2")
-        slide_one_xml = zf.read(slide_one).decode("utf-8", errors="ignore")
-        slide_two_xml = zf.read(slide_two).decode("utf-8", errors="ignore")
-        assert "Label: Beta" in slide_one_xml
-        assert "Label: Alpha" in slide_two_xml
+    year1_total, year2_total = _waterfall_base_values(
+        df,
+        "Alpha",
+        target_label="Cross",
+        year1="Year1",
+        year2="Year2",
+    )
+    assert year1_total == 100
+    assert year2_total == 150
