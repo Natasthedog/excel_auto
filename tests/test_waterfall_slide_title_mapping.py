@@ -4,7 +4,7 @@ import pandas as pd
 from pptx import Presentation
 from pptx.enum.shapes import PP_PLACEHOLDER
 
-from app import _resolve_target_label_for_slide, _waterfall_base_values
+from app import _resolve_target_level_label_for_slide, _waterfall_base_values
 
 
 def _make_slide_with_title(title_text: str):
@@ -25,13 +25,13 @@ def _make_slide_with_title(title_text: str):
     return slide
 
 
-def test_resolve_target_label_from_slide_title() -> None:
-    slide = _make_slide_with_title("Competitor")
-    resolved = _resolve_target_label_for_slide(slide, ["Own", "Competitor"])
-    assert resolved == "Competitor"
+def test_resolve_target_level_label_from_slide_title() -> None:
+    slide = _make_slide_with_title("  beta ")
+    resolved = _resolve_target_level_label_for_slide(slide, ["Alpha", "Beta"])
+    assert resolved == "Beta"
 
 
-def test_waterfall_base_values_respect_target_label() -> None:
+def test_waterfall_base_values_use_own_target_label() -> None:
     df = pd.DataFrame(
         [
             {"Target Level Label": "Alpha", "Target Label": "Own", "Year": "Year1", "Actuals": 10},
@@ -53,9 +53,8 @@ def test_waterfall_base_values_respect_target_label() -> None:
     year1_total, year2_total = _waterfall_base_values(
         df,
         "Alpha",
-        target_label="Cross",
         year1="Year1",
         year2="Year2",
     )
-    assert year1_total == 100
-    assert year2_total == 150
+    assert year1_total == 10
+    assert year2_total == 20

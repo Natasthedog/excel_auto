@@ -751,6 +751,95 @@ def _resolve_label_from_text(text: str, labels: list[str], threshold: float = 85
     return best_label
 
 
+def _resolve_target_level_label_for_slide(slide, labels: list[str]) -> str | None:
+    candidates = []
+    slide_title = _slide_title(slide)
+    if slide_title:
+        candidates.append(("title", slide_title))
+    slide_name = getattr(slide, "name", None) or ""
+    if slide_name:
+        candidates.append(("name", slide_name))
+    if not candidates:
+        return None
+    errors = []
+    for source, text in candidates:
+        try:
+            return _resolve_label_from_text(text, labels)
+        except ValueError as exc:
+            error_message = (
+                f"Could not resolve Target Level Label from slide {source} {text!r}: {exc}"
+            )
+            errors.append(error_message)
+    if errors:
+        raise ValueError(" | ".join(errors))
+    return None
+
+
+def _normalize_lookup_value(value: str) -> str:
+    normalized = str(value).strip().casefold()
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    normalized = normalized.replace("_", " ")
+    normalized = " ".join(normalized.split())
+    return normalized
+
+
+def _format_fuzzy_candidates(candidates: list[tuple[float, str]]) -> str:
+    return ", ".join(f"{label!r} ({score:.1f})" for score, label in candidates)
+
+
+def _resolve_label_from_text(text: str, labels: list[str], threshold: float = 85.0) -> str:
+    normalized_text = _normalize_lookup_value(text)
+    if not normalized_text:
+        raise ValueError("Slide text is empty after normalization.")
+    normalized_labels = []
+    exact_matches = []
+    for label in labels:
+        normalized_label = _normalize_lookup_value(label)
+        normalized_labels.append((label, normalized_label))
+        if normalized_label == normalized_text:
+            exact_matches.append(label)
+    if exact_matches:
+        resolved = exact_matches[0]
+        logger.info(
+            "Resolved slide text %r -> %r (score 100.0)",
+            text,
+            resolved,
+        )
+        return resolved
+    from difflib import SequenceMatcher
+
+    scored = []
+    for label, normalized_label in normalized_labels:
+        if not normalized_label:
+            continue
+        score = SequenceMatcher(None, normalized_text, normalized_label).ratio() * 100
+        scored.append((score, label))
+    scored.sort(reverse=True)
+    top_candidates = scored[:5]
+    if not scored or scored[0][0] < threshold:
+        raise ValueError(
+            "No slide text match found (threshold {:.0f}). Top candidates: {}".format(
+                threshold,
+                _format_fuzzy_candidates(top_candidates),
+            )
+        )
+    best_score, best_label = scored[0]
+    if len(scored) > 1 and scored[1][0] >= threshold and (best_score - scored[1][0]) < 2:
+        raise ValueError(
+            "Ambiguous slide text match (threshold {:.0f}). Top candidates: {}".format(
+                threshold,
+                _format_fuzzy_candidates(top_candidates),
+            )
+        )
+    logger.info(
+        "Resolved slide text %r -> %r (score %.1f)",
+        text,
+        best_label,
+        best_score,
+    )
+    return best_label
+
+
 def _normalize_target_label_value(value: str | None) -> str:
     normalized = _normalize_text_value(value)
     if normalized == "competitor":
@@ -1073,7 +1162,6 @@ def _resolve_base_value_columns(gathered_df: pd.DataFrame) -> tuple[dict, int]:
 def _waterfall_base_values(
     gathered_df: pd.DataFrame,
     target_level_label: str,
-    target_label: str | None = None,
     year1: str | None = None,
     year2: str | None = None,
 ) -> tuple[float, float]:
@@ -1083,13 +1171,10 @@ def _waterfall_base_values(
     data_df = gathered_df.iloc[data_start_idx:]
     target_level = _normalize_text_value(target_level_label)
     target_level_series = data_df[columns["target_level"]].map(_normalize_text_value)
-    target_label_series = data_df[columns["target_label"]].map(_normalize_target_label_value)
+    target_label_series = data_df[columns["target_label"]].map(_normalize_text_value)
     year_series = data_df[columns["year"]].map(_normalize_text_value)
     actuals = pd.to_numeric(data_df[columns["actuals"]], errors="coerce").fillna(0)
-    resolved_target_label = _normalize_target_label_value(target_label or "own")
-    base_filter = (target_level_series == target_level) & (
-        target_label_series == resolved_target_label
-    )
+    base_filter = (target_level_series == target_level) & (target_label_series == "own")
     normalized_year1 = _normalize_text_value(year1) if year1 is not None else "year1"
     normalized_year2 = _normalize_text_value(year2) if year2 is not None else "year2"
     year1_total = actuals[base_filter & (year_series == normalized_year1)].sum()
@@ -3396,7 +3481,6 @@ def _build_waterfall_chart_data(
     scope_df: pd.DataFrame | None,
     gathered_df: pd.DataFrame | None = None,
     target_level_label: str | None = None,
-    target_label: str | None = None,
     bucket_labels: list[str] | None = None,
     bucket_values: list[float] | None = None,
     year1: str | None = None,
@@ -3434,7 +3518,6 @@ def _build_waterfall_chart_data(
         base_values = _waterfall_base_values(
             gathered_df,
             target_level_label,
-            target_label,
             year1=year1,
             year2=year2,
         )
@@ -3529,7 +3612,6 @@ def _add_waterfall_chart_from_template(
     scope_df: pd.DataFrame | None,
     gathered_df: pd.DataFrame | None,
     target_level_label: str | None,
-    target_label: str | None,
     bucket_data: dict | None,
     chart_name: str,
 ):
@@ -3547,7 +3629,6 @@ def _add_waterfall_chart_from_template(
         scope_df,
         gathered_df,
         target_level_label,
-        target_label,
         bucket_data.get("labels") if bucket_data else None,
         bucket_data.get("values") if bucket_data else None,
         year1=bucket_data.get("year1") if bucket_data else None,
@@ -3649,7 +3730,6 @@ def _update_waterfall_chart(
     scope_df: pd.DataFrame | None,
     gathered_df: pd.DataFrame | None,
     target_level_label: str | None,
-    target_label: str | None,
     bucket_data: dict | None,
 ) -> None:
     chart_shapes = [shape for shape in slide.shapes if shape.has_chart]
@@ -3665,7 +3745,6 @@ def _update_waterfall_chart(
             scope_df,
             gathered_df,
             target_level_label,
-            target_label,
             bucket_data.get("labels") if bucket_data else None,
             bucket_data.get("values") if bucket_data else None,
             year1=bucket_data.get("year1") if bucket_data else None,
@@ -3770,25 +3849,27 @@ def populate_category_waterfall(
             )
         )
 
-    target_label_values = _target_label_values_from_gathered_df(gathered_df)
-    if not target_label_values:
-        target_label_values = ["Own"]
     seen_partnames: set[str] = set()
-    for idx, label in enumerate(labels):
+    remaining_labels = labels.copy()
+    for idx in range(len(labels)):
         marker_text, slide = available_slides[idx]
-        resolved_target_label = _resolve_target_label_for_slide(slide, target_label_values)
-        if resolved_target_label is None:
-            resolved_target_label = "Own"
+        resolved_label = _resolve_target_level_label_for_slide(slide, remaining_labels)
+        if resolved_label is None:
+            if not remaining_labels:
+                raise ValueError("No remaining Target Level Label values to assign.")
+            resolved_label = remaining_labels[0]
             logger.info(
-                "No slide title/name found for %s; using default Target Label %r.",
+                "No slide title/name found for %s; using ordered Target Level Label %r.",
                 marker_text,
-                resolved_target_label,
+                resolved_label,
             )
+        if resolved_label in remaining_labels:
+            remaining_labels.remove(resolved_label)
         _ensure_unique_chart_parts_on_slide(slide, seen_partnames)
         _update_waterfall_axis_placeholders(
             prs,
             slide,
-            target_level_label_value=label,
+            target_level_label_value=resolved_label,
             modelled_in_value=modelled_in_value,
             metric_value=metric_value,
         )
@@ -3796,11 +3877,10 @@ def populate_category_waterfall(
             slide,
             scope_df,
             gathered_df,
-            label,
-            resolved_target_label,
+            resolved_label,
             bucket_data,
         )
-        _set_waterfall_slide_header(slide, label, marker_text=marker_text)
+        _set_waterfall_slide_header(slide, resolved_label, marker_text=marker_text)
 
 def build_pptx_from_template(
     template_bytes,
