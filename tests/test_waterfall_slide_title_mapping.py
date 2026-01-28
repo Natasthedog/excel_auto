@@ -31,6 +31,12 @@ def test_resolve_target_level_label_from_slide_title() -> None:
     assert resolved == "Beta"
 
 
+def test_resolve_target_level_label_returns_none_for_unmatched_title() -> None:
+    slide = _make_slide_with_title("<Waterfall Template>")
+    resolved = _resolve_target_level_label_for_slide(slide, ["Alpha", "Beta"])
+    assert resolved is None
+
+
 def test_waterfall_base_values_use_own_target_label() -> None:
     df = pd.DataFrame(
         [

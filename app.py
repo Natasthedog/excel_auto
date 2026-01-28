@@ -766,9 +766,15 @@ def _resolve_target_level_label_for_slide(slide, labels: list[str]) -> str | Non
         try:
             return _resolve_label_from_text(text, labels)
         except ValueError as exc:
+            message = str(exc)
             error_message = (
                 f"Could not resolve Target Level Label from slide {source} {text!r}: {exc}"
             )
+            if message.startswith("No slide text match found") or message.startswith(
+                "Slide text is empty after normalization"
+            ):
+                logger.info("%s", error_message)
+                continue
             errors.append(error_message)
     if errors:
         raise ValueError(" | ".join(errors))
