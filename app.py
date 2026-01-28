@@ -1211,42 +1211,6 @@ def _compute_bucket_deltas(
             deltas.append((f"{display_label} {group}", float(year2_sum - year1_sum)))
     return deltas
 
-
-def _compute_bucket_deltas_by_column(
-    data_df: pd.DataFrame,
-    metadata: dict,
-    selected_columns: list[str],
-    target_label: str,
-    year1: str,
-    year2: str,
-) -> list[tuple[str, float]]:
-    target_label_id = metadata.get("target_label_id")
-    year_id = metadata.get("year_id")
-    if not target_label_id:
-        raise ValueError("The gatheredCN10 file is missing the Target Label column.")
-    if not year_id:
-        raise ValueError("The gatheredCN10 file is missing the Year column.")
-
-    normalized_target = _normalize_text_value(target_label)
-    normalized_year1 = _normalize_text_value(year1)
-    normalized_year2 = _normalize_text_value(year2)
-
-    target_series = data_df[target_label_id].map(_normalize_text_value)
-    year_series = data_df[year_id].map(_normalize_text_value)
-    year1_mask = (target_series == normalized_target) & (year_series == normalized_year1)
-    year2_mask = (target_series == normalized_target) & (year_series == normalized_year2)
-
-    deltas: list[tuple[str, float]] = []
-    for column_id in selected_columns:
-        if column_id not in data_df.columns:
-            continue
-        values = pd.to_numeric(data_df[column_id], errors="coerce").fillna(0)
-        year1_sum = values[year1_mask].sum()
-        year2_sum = values[year2_mask].sum()
-        deltas.append((column_id, float(year2_sum - year1_sum)))
-    return deltas
-
-
 def _resolve_base_value_columns(gathered_df: pd.DataFrame) -> tuple[dict, int]:
     column_candidates = {
         "target_level": ["Target Level Label", "Target Level"],
@@ -4898,4 +4862,5 @@ def finalize_download(status_text, data_contents):
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
