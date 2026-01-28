@@ -42,9 +42,13 @@ def _add_textbox(slide, name: str, text: str, top_offset: float) -> None:
     textbox.text = text
 
 
-def _add_waterfall_chart(slide, left_offset: float = 0.0) -> None:
+def _add_waterfall_chart(
+    slide,
+    left_offset: float = 0.0,
+    categories: list[str] | None = None,
+) -> None:
     chart_data = ChartData()
-    chart_data.categories = ["Base", "Change", "Total"]
+    chart_data.categories = categories or ["Base", "Change", "Total"]
     chart_data.add_series("Base", (100, 0, 110))
     chart_data.add_series("Positives", (0, 10, 0))
     chart_data.add_series("Negatives", (0, -5, 0))
@@ -70,6 +74,7 @@ def build_test_template(
     path: Path,
     waterfall_slide_count: int,
     waterfall_chart_count: int = 1,
+    waterfall_categories: list[str] | None = None,
 ) -> None:
     prs = Presentation()
     blank_layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[0]
@@ -91,7 +96,11 @@ def build_test_template(
         _add_textbox(slide, f"WaterfallMetric{idx + 1}", "Metric: <metric>", 1.9)
         _add_textbox(slide, f"WaterfallStyle{idx + 1}", f"Template Style {idx + 1}", 6.1)
         for chart_idx in range(waterfall_chart_count):
-            _add_waterfall_chart(slide, left_offset=9.2 * chart_idx)
+            _add_waterfall_chart(
+                slide,
+                left_offset=9.2 * chart_idx,
+                categories=waterfall_categories,
+            )
 
     prs.save(path)
 
