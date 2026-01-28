@@ -27,7 +27,8 @@ def _parse_two_row_header_dataframe(
         if not group:
             continue
         group_key = _normalize_column_name(group)
-        if group_key in {"targetlabel", "year", "targetlevellabel", "targetlevel"}:
+        # Exclude metadata columns from being treated as "Bucket Groups"
+        if group_key in {"targetlabel", "year", "targetlevellabel", "targetlevel", "level", "tgtlevel"}:
             continue
         if group not in group_map:
             group_map[group] = []
@@ -42,26 +43,35 @@ def _parse_two_row_header_dataframe(
 
     target_label_id = None
     year_id = None
-    target_level_label_id = None  # NEW
+    target_level_label_id = None
+
+    # Broader candidates for the Target Level Label column
+    level_candidates = [
+        "Target Level Label", "Target Level", "Target_Level", "Tgt Level", "Level", "Label"
+    ]
 
     for column in columns_meta:
+        # Find Target Label (Own/Cross)
         if target_label_id is None and _two_row_column_match(
             column["group"],
             column["subheader"],
-            ["Target Label"],
+            ["Target Label", "Target Type"],
         ):
             target_label_id = column["id"]
+        
+        # Find Year
         if year_id is None and _two_row_column_match(
             column["group"],
             column["subheader"],
-            ["Year"],
+            ["Year", "Model Year"],
         ):
             year_id = column["id"]
-        # NEW: Find Target Level Label ID
+
+        # Find Target Level Label (Brand/Segment name)
         if target_level_label_id is None and _two_row_column_match(
             column["group"],
             column["subheader"],
-            ["Target Level Label", "Target Level"],
+            level_candidates,
         ):
             target_level_label_id = column["id"]
 
@@ -73,9 +83,12 @@ def _parse_two_row_header_dataframe(
         "group_order": group_order,
         "target_label_id": target_label_id,
         "year_id": year_id,
-        "target_level_label_id": target_level_label_id, # NEW
+        "target_level_label_id": target_level_label_id, # Crucial ID
     }
     return data_df, metadata
+
+
+
 
 def _compute_bucket_deltas(
     data_df: pd.DataFrame,
@@ -83,7 +96,7 @@ def _compute_bucket_deltas(
     bucket_config: dict[str, dict[str, list[str]]],
     year1: str,
     year2: str,
-    target_level_filter: str | None = None, # NEW argument
+    target_level_filter: str | None = None,
 ) -> list[tuple[str, float]]:
     """Compute Year2-Year1 deltas for each bucket group, optionally filtered by Target Level Label."""
     target_label_id = metadata.get("target_label_id")
@@ -94,6 +107,39 @@ def _compute_bucket_deltas(
         raise ValueError("The gatheredCN10 file is missing the Target Label column.")
     if not year_id:
         raise ValueError("The gatheredCN10 file is missing the Year column.")
+    
+    # Safety Check: If we need to filter by specific level (Brand A) but can't find the column,
+    # we CANNOT proceed, or we will return the Global Total (Sum of All Brands).
+    # It is better to return 0s than incorrect global data.
+    if target_level_filter and not target_level_id:
+        logger.warning(
+            "Target Level Filter requested ('%s') but 'Target Level Label' column not found in buckets file. Returning 0s.",
+            target_level_filter
+        )
+        # Return 0s for all configured groups
+        deltas = []
+        ordered_groups = [g for g in metadata.get("group_order", []) if g in bucket_config] or list(bucket_config.keys())
+        for group in ordered_groups:
+            config = bucket_config.get(group, {})
+            target_labels = config.get("target_labels", [])
+            if not target_labels:
+                continue
+            
+            # Replicate the structure of the output list but with 0.0 values
+            normalized_targets = []
+            for label in target_labels:
+                normalized = _normalize_text_value(label)
+                if normalized and normalized not in normalized_targets:
+                    normalized_targets.append(normalized)
+            
+            # Add Own/Cross/Specifics
+            if "own" in normalized_targets: deltas.append((f"{DISPLAY_LABEL['Own']} {group}", 0.0))
+            if "cross" in normalized_targets: deltas.append((f"{DISPLAY_LABEL['Cross']} {group}", 0.0))
+            for label in target_labels:
+                norm = _normalize_text_value(label)
+                if norm not in {"own", "cross"}:
+                    deltas.append((f"{label} {group}", 0.0))
+        return deltas
 
     normalized_year1 = _normalize_text_value(year1)
     normalized_year2 = _normalize_text_value(year2)
@@ -101,7 +147,7 @@ def _compute_bucket_deltas(
     target_series = data_df[target_label_id].map(_normalize_text_value)
     year_series = data_df[year_id].map(_normalize_text_value)
 
-    # NEW: Apply Target Level Filter if provided
+    # Apply Target Level Filter if provided
     level_mask = None
     if target_level_filter and target_level_id:
         level_series = data_df[target_level_id].map(_normalize_text_value)
@@ -172,12 +218,12 @@ def _compute_bucket_deltas(
 def populate_category_waterfall(
     prs,
     gathered_df: pd.DataFrame,
-    parsed_df: pd.DataFrame | None = None, # NEW
-    metadata: dict | None = None, # NEW
+    parsed_df: pd.DataFrame | None = None,
+    metadata: dict | None = None,
     scope_df: pd.DataFrame | None = None,
     target_labels: list[str] | None = None,
-    bucket_config: dict | None = None, # NEW
-    bucket_years: dict | None = None, # NEW
+    bucket_config: dict | None = None,
+    bucket_years: dict | None = None,
     modelled_in_value: str | None = None,
     metric_value: str | None = None,
 ):
@@ -190,7 +236,7 @@ def populate_category_waterfall(
             gathered_df,
             year1=year1,
             year2=year2,
-            target_labels=bucket_years.get("target_labels") if bucket_years else None, # Reuse stored target filters if available
+            target_labels=bucket_years.get("target_labels") if bucket_years else None,
         )
     if not labels:
         return
@@ -212,7 +258,7 @@ def populate_category_waterfall(
         marker_text, slide = available_slides[idx]
         _ensure_unique_chart_parts_on_slide(slide, seen_partnames)
         
-        # NEW: Compute bucket deltas specifically for this label
+        # Compute bucket deltas specifically for this label
         current_bucket_data = None
         if parsed_df is not None and metadata and bucket_config and year1 and year2:
             try:
@@ -243,177 +289,5 @@ def populate_category_waterfall(
             metric_value=metric_value,
         )
         
-        # Pass the calculated specific data
         _update_waterfall_chart(slide, scope_df, gathered_df, label, current_bucket_data)
         _set_waterfall_slide_header(slide, label, marker_text=marker_text)
-
-
-
-
-
-def build_pptx_from_template(
-    template_bytes,
-    df,
-    target_brand=None,
-    project_name=None,
-    scope_df=None,
-    product_description_df=None,
-    waterfall_targets=None,
-    # New Arguments
-    parsed_df=None,
-    metadata=None,
-    bucket_config=None,
-    bucket_years=None,
-    # End New Arguments
-    modelled_in_value: str | None = None,
-    metric_value: str | None = None,
-):
-    # ... existing Slide 1 & 2 logic ...
-    
-    if project_name == "MMx":
-        try:
-            populate_category_waterfall(
-                prs,
-                df,
-                parsed_df=parsed_df,
-                metadata=metadata,
-                scope_df=scope_df,
-                target_labels=waterfall_targets,
-                bucket_config=bucket_config,
-                bucket_years=bucket_years,
-                modelled_in_value=modelled_in_value,
-                metric_value=metric_value,
-            )
-        except Exception:
-            logger.exception("Failed to populate category waterfall slides.")
-            raise
-
-    # ... save and return ...
-
-
-
-
-
-
-
-@callback(
-    Output("download","data"),
-    Output("status","children"),
-    Input("go","n_clicks"),
-    State("data-upload","contents"),
-    State("data-upload","filename"),
-    State("scope-upload", "contents"),
-    State("scope-upload", "filename"),
-    State("project-select", "value"),
-    State("waterfall-targets", "value"),
-    # New States needed
-    State("bucket-config", "data"),
-    State("bucket-year1", "value"),
-    State("bucket-year2", "value"),
-    prevent_initial_call=True
-)
-def generate_deck(
-    n_clicks,
-    data_contents,
-    data_name,
-    scope_contents,
-    scope_name,
-    project_name,
-    waterfall_targets,
-    bucket_config,
-    year1,
-    year2,
-):
-    if not data_contents or not project_name:
-        return no_update, "Please upload the data file and select a project."
-
-    template_path = PROJECT_TEMPLATES.get(project_name)
-    if not template_path or not template_path.exists():
-        return no_update, "The selected project template could not be found."
-    try:
-        # 1. Standard DF for KPI tables/Scope
-        df = df_from_contents(data_contents, data_name)
-        
-        # 2. Parsed DF for Waterfall Buckets (Robust 2-row header parsing)
-        parsed_df = None
-        metadata = None
-        if bucket_config and year1 and year2:
-            try:
-                raw_df = raw_df_from_contents(data_contents, data_name)
-                parsed_df, metadata = _parse_two_row_header_dataframe(raw_df)
-            except Exception as e:
-                logger.warning(f"Could not parse gatheredCN10 for buckets: {e}")
-
-        # Bucket Years Metadata
-        bucket_years = {"year1": year1, "year2": year2} if year1 and year2 else None
-        
-        scope_df = None
-        product_description_df = None
-        project_details_df = None
-        modelled_in_value = None
-        metric_value = None
-        if scope_contents:
-            try:
-                scope_df = scope_df_from_contents(scope_contents, scope_name)
-            except Exception:
-                scope_df = None
-            try:
-                product_description_df = product_description_df_from_contents(
-                    scope_contents, scope_name
-                )
-            except Exception:
-                product_description_df = None
-            try:
-                project_details_df = project_details_df_from_contents(
-                    scope_contents, scope_name
-                )
-            except Exception:
-                project_details_df = None
-        if project_details_df is not None:
-            modelled_in_value = _project_detail_value_from_df(
-                project_details_df,
-                "modelled in",
-                [
-                    "Sales will be modelled in",
-                    "Sales will be modeled in",
-                    "Sales modelled in",
-                    "Sales modeled in",
-                ],
-                "Sales will be modelled in",
-            )
-            metric_value = _project_detail_value_from_df(
-                project_details_df,
-                "metric",
-                [
-                    "Volume metric (unique per dataset)",
-                    "Volume metric unique per dataset",
-                    "Volume metric",
-                ],
-                "Volume metric (unique per dataset)",
-            )
-        target_brand = target_brand_from_scope_df(scope_df)
-        template_bytes = template_path.read_bytes()
-
-        pptx_bytes = build_pptx_from_template(
-            template_bytes,
-            df,
-            target_brand,
-            project_name,
-            scope_df,
-            product_description_df,
-            waterfall_targets,
-            parsed_df=parsed_df,        # Pass new
-            metadata=metadata,          # Pass new
-            bucket_config=bucket_config,# Pass new
-            bucket_years=bucket_years,  # Pass new
-            modelled_in_value=modelled_in_value,
-            metric_value=metric_value,
-        )
-        return dcc.send_bytes(lambda buff: buff.write(pptx_bytes), "deck.pptx"), "Building deck..."
-
-    except Exception as exc:
-        logger.exception("Deck generation failed.")
-        message = str(exc).strip()
-        if not message:
-            message = "Unknown error. Check server logs for details."
-        return no_update, f"Error ({type(exc).__name__}): {message}"
