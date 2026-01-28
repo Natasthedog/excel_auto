@@ -6,6 +6,7 @@ import pandas as pd
 from pptx import Presentation
 from pptx.chart.data import ChartData
 from pptx.enum.chart import XL_CHART_TYPE
+from pptx.enum.shapes import PP_PLACEHOLDER
 from pptx.util import Inches
 
 from app import build_pptx_from_template
@@ -70,9 +71,21 @@ def build_test_template(
     path: Path,
     waterfall_slide_count: int,
     waterfall_chart_count: int = 1,
+    waterfall_titles: list[str] | None = None,
 ) -> None:
     prs = Presentation()
     blank_layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[0]
+    title_layout = None
+    if waterfall_titles:
+        for layout in prs.slide_layouts:
+            if any(
+                placeholder.placeholder_format.type == PP_PLACEHOLDER.TITLE
+                for placeholder in layout.placeholders
+            ):
+                title_layout = layout
+                break
+        if title_layout is None:
+            title_layout = prs.slide_layouts[0]
 
     slide1 = prs.slides.add_slide(blank_layout)
     _add_textbox(slide1, "TitleBox", "Title", 0.5)
@@ -84,7 +97,12 @@ def build_test_template(
 
     for idx in range(waterfall_slide_count):
         marker = "<Waterfall Template>" if idx == 0 else f"<Waterfall Template{idx + 1}>"
-        slide = prs.slides.add_slide(blank_layout)
+        slide_layout = title_layout if waterfall_titles else blank_layout
+        slide = prs.slides.add_slide(slide_layout)
+        if waterfall_titles:
+            title_shape = slide.shapes.title
+            if title_shape is not None:
+                title_shape.text = waterfall_titles[idx]
         _add_textbox(slide, f"WaterfallMarker{idx + 1}", marker, 0.4)
         _add_textbox(slide, f"WaterfallLabel{idx + 1}", "Label: <Target Level Label>", 0.9)
         _add_textbox(slide, f"WaterfallModelled{idx + 1}", "Modelled in: <modelled in>", 1.4)
