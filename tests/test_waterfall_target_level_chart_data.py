@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 
 import pandas as pd
 
+from app import _waterfall_series_from_gathered_df
 from test_utils import build_deck_bytes, build_test_template
 
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -102,3 +103,42 @@ def test_waterfall_chart_uses_target_level_label_data(tmp_path) -> None:
 
     assert alpha_values == [100.0, 0.0, 110.0]
     assert beta_values == [200.0, 0.0, 210.0]
+
+
+def test_waterfall_label_columns_filter_by_target_level() -> None:
+    rows = []
+    for label, base_value in [("Alpha", 100), ("Beta", 200)]:
+        for idx, category in enumerate(["Base", "Change", "Total"]):
+            rows.append(
+                {
+                    "Target Level Label": label,
+                    "Vars": category,
+                    "Base": [base_value, 0, base_value + 10][idx],
+                    "Promo": 0,
+                    "Media": 0,
+                    "Blanks": [0, base_value, base_value + 5][idx],
+                    "Positives": [0, 10, 0][idx],
+                    "Negatives": [0, -5, 0][idx],
+                    "labs-Base": f"{label}-base-{idx}",
+                    "labs-Positives": f"{label}-pos-{idx}",
+                }
+            )
+    df = pd.DataFrame(rows)
+
+    alpha_result = _waterfall_series_from_gathered_df(df, None, "Alpha")
+    beta_result = _waterfall_series_from_gathered_df(df, None, "Beta")
+
+    assert alpha_result is not None
+    assert beta_result is not None
+
+    _, _, alpha_labels = alpha_result
+    _, _, beta_labels = beta_result
+
+    assert alpha_labels["labs-Base"] == ["Alpha-base-0", "Alpha-base-1", "Alpha-base-2"]
+    assert beta_labels["labs-Base"] == ["Beta-base-0", "Beta-base-1", "Beta-base-2"]
+    assert alpha_labels["labs-Positives"] == [
+        "Alpha-pos-0",
+        "Alpha-pos-1",
+        "Alpha-pos-2",
+    ]
+    assert beta_labels["labs-Positives"] == ["Beta-pos-0", "Beta-pos-1", "Beta-pos-2"]

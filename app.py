@@ -2346,6 +2346,25 @@ def _apply_label_columns(ws, label_columns: dict[int, dict[str, list]], total_ro
             ws.cell(row=row_offset + 2, column=col_idx, value=values[row_offset])
 
 
+def _apply_gathered_waterfall_labels(
+    ws,
+    label_values: dict[str, list],
+    total_rows: int,
+) -> set[str]:
+    applied_headers: set[str] = set()
+    if not label_values:
+        return applied_headers
+    for header, values in label_values.items():
+        col_idx = _find_header_column(ws, [header])
+        if col_idx is None:
+            continue
+        applied_headers.add(_normalize_column_name(header))
+        aligned_values = _align_label_values(values, total_rows)
+        for row_offset in range(total_rows):
+            ws.cell(row=row_offset + 2, column=col_idx, value=aligned_values[row_offset])
+    return applied_headers
+
+
 def _update_lab_base_label(
     label_columns: dict[int, dict[str, list]],
     base_indices: tuple[int, int] | None,
@@ -2521,7 +2540,9 @@ def _update_all_waterfall_labs(
     ws,
     base_indices: tuple[int, int] | None,
     base_values: tuple[float, float] | None,
+    skip_headers: set[str] | None = None,
 ) -> None:
+    skip_headers = {value for value in (skip_headers or set()) if value}
     labs_base_col = _find_header_column(ws, ["labs-Base"])
     labs_promo_col = _find_header_column(ws, ["labs-Promo"])
     labs_media_col = _find_header_column(ws, ["labs-Media"])
@@ -2535,7 +2556,7 @@ def _update_all_waterfall_labs(
     negatives_col = _find_header_column(ws, ["Negatives"])
 
     total_rows = ws.max_row
-    if labs_base_col:
+    if labs_base_col and _normalize_column_name("labs-Base") not in skip_headers:
         for row_idx in range(2, total_rows + 1):
             ws.cell(row=row_idx, column=labs_base_col).value = None
         if base_indices and base_values:
@@ -2548,7 +2569,7 @@ def _update_all_waterfall_labs(
                     ws.cell(row=row_idx, column=labs_base_col).value = formatted[idx]
 
     for row_idx in range(2, total_rows + 1):
-        if labs_promo_col:
+        if labs_promo_col and _normalize_column_name("labs-Promo") not in skip_headers:
             value = _numeric_cell_value(ws.cell(row=row_idx, column=promo_col)) if promo_col else None
             cell = ws.cell(row=row_idx, column=labs_promo_col)
             if value is None or value == 0:
@@ -2556,7 +2577,7 @@ def _update_all_waterfall_labs(
             else:
                 sign = "+" if value > 0 else "-"
                 cell.value = _format_waterfall_label(value, sign)
-        if labs_media_col:
+        if labs_media_col and _normalize_column_name("labs-Media") not in skip_headers:
             value = _numeric_cell_value(ws.cell(row=row_idx, column=media_col)) if media_col else None
             cell = ws.cell(row=row_idx, column=labs_media_col)
             if value is None or value == 0:
@@ -2564,9 +2585,9 @@ def _update_all_waterfall_labs(
             else:
                 sign = "+" if value > 0 else "-"
                 cell.value = _format_waterfall_label(value, sign)
-        if labs_blanks_col:
+        if labs_blanks_col and _normalize_column_name("labs-Blanks") not in skip_headers:
             ws.cell(row=row_idx, column=labs_blanks_col).value = None
-        if labs_positives_col:
+        if labs_positives_col and _normalize_column_name("labs-Positives") not in skip_headers:
             pos_value = (
                 _numeric_cell_value(ws.cell(row=row_idx, column=positives_col))
                 if positives_col
@@ -2577,7 +2598,7 @@ def _update_all_waterfall_labs(
                 cell.value = None
             else:
                 cell.value = _format_waterfall_label(pos_value, "+")
-        if labs_negatives_col:
+        if labs_negatives_col and _normalize_column_name("labs-Negatives") not in skip_headers:
             neg_value = (
                 _numeric_cell_value(ws.cell(row=row_idx, column=negatives_col))
                 if negatives_col
@@ -3612,11 +3633,21 @@ def _align_series_values(values: list[float], total_count: int) -> list[float]:
     return values
 
 
+def _align_label_values(values: list, total_count: int) -> list:
+    if total_count <= 0:
+        return values
+    if len(values) < total_count:
+        return values + [None] * (total_count - len(values))
+    if len(values) > total_count:
+        return values[:total_count]
+    return values
+
+
 def _waterfall_series_from_gathered_df(
     gathered_df: pd.DataFrame,
     scope_df: pd.DataFrame | None,
     target_level_label: str,
-) -> tuple[list[str], dict[str, list[float]]] | None:
+) -> tuple[list[str], dict[str, list[float]], dict[str, list]] | None:
     waterfall_df = _build_category_waterfall_df(
         gathered_df,
         target_level_label=target_level_label,
@@ -3639,9 +3670,26 @@ def _waterfall_series_from_gathered_df(
                 .astype(float)
                 .tolist()
             )
-    if not series_values:
+    label_values: dict[str, list] = {}
+    for key in [
+        "labs-Base",
+        "labs-Promo",
+        "labs-Media",
+        "labs-Blanks",
+        "labs-Positives",
+        "labs-Negatives",
+    ]:
+        if key in waterfall_df.columns:
+            values = []
+            for value in waterfall_df[key].tolist():
+                if pd.isna(value):
+                    values.append(None)
+                else:
+                    values.append(value)
+            label_values[key] = values
+    if not series_values and not label_values:
         return None
-    return categories, series_values
+    return categories, series_values, label_values
 
 
 def _build_waterfall_chart_data(
@@ -3659,8 +3707,10 @@ def _build_waterfall_chart_data(
     tuple[int, int] | None,
     tuple[float, float] | None,
     list[tuple[str, list[float]]],
+    dict[str, list],
 ]:
     gathered_override = None
+    gathered_label_values: dict[str, list] = {}
     if gathered_df is not None and target_level_label:
         try:
             gathered_override = _waterfall_series_from_gathered_df(
@@ -3676,11 +3726,12 @@ def _build_waterfall_chart_data(
             )
             gathered_override = None
     if gathered_override is not None:
-        categories, gathered_series = gathered_override
+        categories, gathered_series, gathered_label_values = gathered_override
     else:
         categories = _categories_from_chart(chart)
         gathered_series = {}
         categories = _replace_modelling_period_placeholders_in_categories(categories, scope_df)
+        gathered_label_values = {}
     base_indices = _waterfall_base_indices(categories)
     original_base_indices = base_indices
     bucket_labels = list(bucket_labels or [])
@@ -3807,7 +3858,7 @@ def _build_waterfall_chart_data(
                     values[base_indices[1]] = base_values[1]
         cd.add_series(series.name, values)
         series_values.append((series.name, values))
-    return cd, categories, base_indices, base_values, series_values
+    return cd, categories, base_indices, base_values, series_values, gathered_label_values
 
 
 def _add_waterfall_chart_from_template(
@@ -3828,7 +3879,14 @@ def _add_waterfall_chart_from_template(
         _load_chart_workbook(template_chart).active,
         template_series_names,
     )
-    cd, categories, base_indices, base_values, _ = _build_waterfall_chart_data(
+    (
+        cd,
+        categories,
+        base_indices,
+        base_values,
+        _,
+        gathered_label_values,
+    ) = _build_waterfall_chart_data(
         template_chart,
         scope_df,
         gathered_df,
@@ -3862,7 +3920,17 @@ def _add_waterfall_chart_from_template(
     )
     _apply_label_columns(updated_wb.active, label_columns, total_rows)
     _ensure_negatives_column_positive(updated_wb.active)
-    _update_all_waterfall_labs(updated_wb.active, base_indices, base_values)
+    applied_headers = _apply_gathered_waterfall_labels(
+        updated_wb.active,
+        gathered_label_values,
+        total_rows,
+    )
+    _update_all_waterfall_labs(
+        updated_wb.active,
+        base_indices,
+        base_values,
+        skip_headers=applied_headers,
+    )
     _save_chart_workbook(chart_shape.chart, updated_wb)
     _update_waterfall_chart_caches(chart_shape.chart, updated_wb, categories)
     _update_waterfall_yoy_arrows(slide, base_values)
@@ -3944,7 +4012,14 @@ def _update_waterfall_chart(
         chart = chart_shape.chart
         series_names = [series.name for series in chart.series]
         label_columns = _capture_label_columns(_load_chart_workbook(chart).active, series_names)
-        cd, categories, base_indices, base_values, _ = _build_waterfall_chart_data(
+        (
+            cd,
+            categories,
+            base_indices,
+            base_values,
+            _,
+            gathered_label_values,
+        ) = _build_waterfall_chart_data(
             chart,
             scope_df,
             gathered_df,
@@ -3965,7 +4040,17 @@ def _update_waterfall_chart(
         )
         _apply_label_columns(updated_wb.active, label_columns, total_rows)
         _ensure_negatives_column_positive(updated_wb.active)
-        _update_all_waterfall_labs(updated_wb.active, base_indices, base_values)
+        applied_headers = _apply_gathered_waterfall_labels(
+            updated_wb.active,
+            gathered_label_values,
+            total_rows,
+        )
+        _update_all_waterfall_labs(
+            updated_wb.active,
+            base_indices,
+            base_values,
+            skip_headers=applied_headers,
+        )
         _save_chart_workbook(chart, updated_wb)
         chart_type = getattr(
             chart,
