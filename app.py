@@ -4357,7 +4357,7 @@ def generate_deck(
 
 # Important: Dash's dcc.send_bytes expects a writer function; we provide inline:
 def _writer(f):
-    pass
+    pass+
 
 # Patch: we pass a lambda that writes nothing (handled internally). To attach bytes, we can use:
 # return dcc.send_bytes(lambda b: b.write(pptx_bytes), "deck.pptx")
@@ -4376,5 +4376,4 @@ def finalize_download(status_text, data_contents):
 
 if __name__ == "__main__":
     app.run(debug=True)
-
 
