@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 import re
+import json
+from pathlib import Path
 
 import pandas as pd
 from dash import (
@@ -4039,7 +4041,11 @@ def compute_waterfall_payloads_for_all_labels(
             _payload_checksum(payload.series_values),
         )
     return payloads_by_label
+out = Path("debug_waterfall_payloads.json")
+with out.open("w", encoding="utf-8") as f:
+    json.dump(payloads_by_label, f, indent=2, ensure_ascii=False)
 
+print(f"[waterfall] wrote payload debug to: {out.resolve()}")
 
 def _add_waterfall_chart_from_template(
     slide,
@@ -5049,7 +5055,7 @@ def generate_deck(
 
 # Important: Dash's dcc.send_bytes expects a writer function; we provide inline:
 def _writer(f):
-    pass+
+    pass
 
 # Patch: we pass a lambda that writes nothing (handled internally). To attach bytes, we can use:
 # return dcc.send_bytes(lambda b: b.write(pptx_bytes), "deck.pptx")
@@ -5068,5 +5074,6 @@ def finalize_download(status_text, data_contents):
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
