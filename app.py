@@ -3825,6 +3825,99 @@ def _build_waterfall_chart_data(
     return cd, categories, base_indices, base_values, series_values, gathered_label_values
 
 
+@dataclass(frozen=True)
+class WaterfallPayload:
+    categories: list[str]
+    series_values: list[tuple[str, list[float]]]
+    base_indices: tuple[int, int] | None
+    base_values: tuple[float, float] | None
+    gathered_label_values: dict[str, list]
+
+
+def _payload_checksum(series_values: list[tuple[str, list[float]]]) -> float:
+    return sum(abs(value) for _, values in series_values for value in values)
+
+
+def _chart_data_from_payload(payload: WaterfallPayload) -> ChartData:
+    cd = ChartData()
+    cd.categories = payload.categories
+    for name, values in payload.series_values:
+        cd.add_series(name, values)
+    return cd
+
+
+def compute_payload_for_label(
+    gathered_df: pd.DataFrame,
+    scope_df: pd.DataFrame | None,
+    target_level_label: str,
+    bucket_data: dict | None,
+    template_chart,
+) -> WaterfallPayload:
+    if template_chart is None:
+        raise ValueError("Template chart is required to compute waterfall payloads.")
+    (
+        _,
+        categories,
+        base_indices,
+        base_values,
+        series_values,
+        gathered_label_values,
+    ) = _build_waterfall_chart_data(
+        template_chart,
+        scope_df,
+        gathered_df,
+        target_level_label,
+        bucket_data.get("labels") if bucket_data else None,
+        bucket_data.get("values") if bucket_data else None,
+        year1=bucket_data.get("year1") if bucket_data else None,
+        year2=bucket_data.get("year2") if bucket_data else None,
+    )
+    return WaterfallPayload(
+        categories=list(categories),
+        series_values=[(name, list(values)) for name, values in series_values],
+        base_indices=base_indices,
+        base_values=base_values,
+        gathered_label_values={
+            key: list(values) for key, values in gathered_label_values.items()
+        },
+    )
+
+
+def compute_waterfall_payloads_for_all_labels(
+    gathered_df: pd.DataFrame,
+    scope_df: pd.DataFrame | None,
+    bucket_data: dict | None,
+    template_chart,
+    target_labels: list[str] | None = None,
+) -> dict[str, WaterfallPayload]:
+    labels = _normalize_target_level_labels(target_labels)
+    if not labels:
+        labels = _target_level_labels_from_gathered_df_with_filters(
+            gathered_df,
+            year1=bucket_data.get("year1") if bucket_data else None,
+            year2=bucket_data.get("year2") if bucket_data else None,
+            target_labels=bucket_data.get("target_labels") if bucket_data else None,
+        )
+    payloads_by_label = {}
+    logger.info("Precomputing waterfall payloads for %d label(s).", len(labels))
+    for label in labels:
+        payload = compute_payload_for_label(
+            gathered_df,
+            scope_df,
+            label,
+            bucket_data,
+            template_chart,
+        )
+        payloads_by_label[label] = payload
+        logger.info(
+            "Computed waterfall payload for %r: %d categories, checksum %.2f",
+            label,
+            len(payload.categories),
+            _payload_checksum(payload.series_values),
+        )
+    return payloads_by_label
+
+
 def _add_waterfall_chart_from_template(
     slide,
     template_slide,
@@ -3963,56 +4056,36 @@ def _set_waterfall_slide_header(slide, label: str, marker_text: str | None = Non
 
 def _update_waterfall_chart(
     slide,
-    scope_df: pd.DataFrame | None,
-    gathered_df: pd.DataFrame | None,
-    target_level_label: str | None,
-    bucket_data: dict | None,
+    payload: WaterfallPayload,
 ) -> None:
     chart_shapes = [shape for shape in slide.shapes if shape.has_chart]
     if not chart_shapes:
         raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
-    last_base_values: tuple[float, float] | None = None
     for chart_shape in chart_shapes:
         chart = chart_shape.chart
         series_names = [series.name for series in chart.series]
         label_columns = _capture_label_columns(_load_chart_workbook(chart).active, series_names)
-        (
-            cd,
-            categories,
-            base_indices,
-            base_values,
-            _,
-            gathered_label_values,
-        ) = _build_waterfall_chart_data(
-            chart,
-            scope_df,
-            gathered_df,
-            target_level_label,
-            bucket_data.get("labels") if bucket_data else None,
-            bucket_data.get("values") if bucket_data else None,
-            year1=bucket_data.get("year1") if bucket_data else None,
-            year2=bucket_data.get("year2") if bucket_data else None,
-        )
+        cd = _chart_data_from_payload(payload)
         chart.replace_data(cd)
         updated_wb = _load_chart_workbook(chart)
-        total_rows = len(categories)
+        total_rows = len(payload.categories)
         _update_lab_base_label(
             label_columns,
-            base_indices,
-            base_values,
+            payload.base_indices,
+            payload.base_values,
             total_rows,
         )
         _apply_label_columns(updated_wb.active, label_columns, total_rows)
         _ensure_negatives_column_positive(updated_wb.active)
         applied_headers = _apply_gathered_waterfall_labels(
             updated_wb.active,
-            gathered_label_values,
+            payload.gathered_label_values,
             total_rows,
         )
         _update_all_waterfall_labs(
             updated_wb.active,
-            base_indices,
-            base_values,
+            payload.base_indices,
+            payload.base_values,
             skip_headers=applied_headers,
         )
         _save_chart_workbook(chart, updated_wb)
@@ -4022,12 +4095,10 @@ def _update_waterfall_chart(
             getattr(XL_CHART_TYPE, "WATERFALL", XL_CHART_TYPE.COLUMN_STACKED),
         )
         if chart_type == getattr(XL_CHART_TYPE, "WATERFALL", XL_CHART_TYPE.COLUMN_STACKED):
-            _update_waterfall_chart_caches(chart, updated_wb, categories)
+            _update_waterfall_chart_caches(chart, updated_wb, payload.categories)
         else:
             _update_chart_label_caches(chart, updated_wb)
-        if base_values is not None:
-            last_base_values = base_values
-    _update_waterfall_yoy_arrows(slide, last_base_values)
+    _update_waterfall_yoy_arrows(slide, payload.base_values)
 
 
 def _resolve_target_level_label_value(
@@ -4102,6 +4173,17 @@ def populate_category_waterfall(
             )
         )
 
+    template_chart = _waterfall_chart_from_slide(available_slides[0][1], "Waterfall Template")
+    if template_chart is None:
+        raise ValueError("Could not find the waterfall chart on the <Waterfall Template> slide.")
+    payloads_by_label = compute_waterfall_payloads_for_all_labels(
+        gathered_df,
+        scope_df,
+        bucket_data,
+        template_chart,
+        target_labels=labels,
+    )
+
     seen_partnames: set[str] = set()
     remaining_labels = labels.copy()
     for idx in range(len(labels)):
@@ -4118,6 +4200,10 @@ def populate_category_waterfall(
             )
         if resolved_label in remaining_labels:
             remaining_labels.remove(resolved_label)
+        if resolved_label not in payloads_by_label:
+            raise ValueError(
+                f"Missing precomputed waterfall payload for Target Level Label {resolved_label!r}."
+            )
         _ensure_unique_chart_parts_on_slide(slide, seen_partnames)
         _update_waterfall_axis_placeholders(
             prs,
@@ -4128,10 +4214,7 @@ def populate_category_waterfall(
         )
         _update_waterfall_chart(
             slide,
-            scope_df,
-            gathered_df,
-            resolved_label,
-            bucket_data,
+            payloads_by_label[resolved_label],
         )
         _set_waterfall_slide_header(slide, resolved_label, marker_text=marker_text)
 
