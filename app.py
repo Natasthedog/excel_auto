@@ -4,7 +4,7 @@ import base64
 import logging
 import copy
 from difflib import SequenceMatcher
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict, is_dataclass
 from datetime import date, timedelta
 from pathlib import Path
 import re
@@ -124,6 +124,16 @@ def _json_safe(x):
     except Exception:
         pass
     return x
+
+
+def _to_jsonable(value):
+    if is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_jsonable(item) for item in value]
+    return _json_safe(value)
 
 
 def df_from_contents(contents, filename):
@@ -4051,7 +4061,7 @@ def compute_waterfall_payloads_for_all_labels(
         )
         out = Path("debug_waterfall_payloads.json")
         with out.open("w", encoding="utf-8") as f:
-            json.dump(payloads_by_label, f, indent=2, ensure_ascii=False)
+            json.dump(_to_jsonable(payloads_by_label), f, indent=2, ensure_ascii=False)
 
         print(f"[waterfall] wrote payload debug to: {out.resolve()}")
     return payloads_by_label
