@@ -3607,6 +3607,73 @@ def _align_label_values(values: list, total_count: int) -> list:
     return values
 
 
+def _sanitize_numeric_value(
+    value,
+    *,
+    label: str | None,
+    field: str,
+    bucket: str | None = None,
+    year1: str | None = None,
+    year2: str | None = None,
+) -> float:
+    if value is None or pd.isna(value):
+        logger.warning(
+            '[waterfall][sanitize] label="%s" bucket="%s" year1="%s" year2="%s" field="%s" was=%r -> 0.0',
+            label or "",
+            bucket or "",
+            year1 or "",
+            year2 or "",
+            field,
+            value,
+        )
+        return 0.0
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError as exc:
+            raise ValueError(
+                "Non-numeric value for "
+                f'{field} (label="{label}", bucket="{bucket}", year1="{year1}", year2="{year2}"): {value!r}'
+            ) from exc
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Non-numeric value for "
+            f'{field} (label="{label}", bucket="{bucket}", year1="{year1}", year2="{year2}"): {value!r}'
+        ) from exc
+
+
+def _sanitize_numeric_list(
+    values: list,
+    *,
+    label: str | None,
+    field_prefix: str,
+    categories: list[str] | None = None,
+    bucket_labels: list[str] | None = None,
+    year1: str | None = None,
+    year2: str | None = None,
+) -> list[float]:
+    sanitized: list[float] = []
+    for idx, value in enumerate(values):
+        bucket = None
+        if bucket_labels and idx < len(bucket_labels):
+            bucket = bucket_labels[idx]
+        elif categories and idx < len(categories):
+            bucket = categories[idx]
+        sanitized.append(
+            _sanitize_numeric_value(
+                value,
+                label=label,
+                field=f"{field_prefix}[{idx}]",
+                bucket=bucket,
+                year1=year1,
+                year2=year2,
+            )
+        )
+    return sanitized
+
+
 def _waterfall_series_from_gathered_df(
     gathered_df: pd.DataFrame,
     scope_df: pd.DataFrame | None,
@@ -3699,7 +3766,14 @@ def _build_waterfall_chart_data(
     base_indices = _waterfall_base_indices(categories)
     original_base_indices = base_indices
     bucket_labels = list(bucket_labels or [])
-    bucket_values = [float(value) for value in (bucket_values or [])]
+    bucket_values = _sanitize_numeric_list(
+        list(bucket_values or []),
+        label=target_level_label,
+        field_prefix="bucket_values",
+        bucket_labels=bucket_labels,
+        year1=year1,
+        year2=year2,
+    )
     if bucket_labels and bucket_values:
         bucket_len = min(len(bucket_labels), len(bucket_values))
         bucket_labels = bucket_labels[:bucket_len]
@@ -3722,6 +3796,22 @@ def _build_waterfall_chart_data(
             target_level_label,
             year1=year1,
             year2=year2,
+        )
+        base_values = (
+            _sanitize_numeric_value(
+                base_values[0],
+                label=target_level_label,
+                field="base_values[0]",
+                year1=year1,
+                year2=year2,
+            ),
+            _sanitize_numeric_value(
+                base_values[1],
+                label=target_level_label,
+                field="base_values[1]",
+                year1=year1,
+                year2=year2,
+            ),
         )
     cd = ChartData()
     cd.categories = categories
@@ -3820,6 +3910,14 @@ def _build_waterfall_chart_data(
                     values[base_indices[0]] = base_values[0]
                 if base_indices[1] < len(values):
                     values[base_indices[1]] = base_values[1]
+        values = _sanitize_numeric_list(
+            values,
+            label=target_level_label,
+            field_prefix=f"series_values[{len(series_values)}]",
+            categories=categories,
+            year1=year1,
+            year2=year2,
+        )
         cd.add_series(series.name, values)
         series_values.append((series.name, values))
     return cd, categories, base_indices, base_values, series_values, gathered_label_values
@@ -3835,7 +3933,32 @@ class WaterfallPayload:
 
 
 def _payload_checksum(series_values: list[tuple[str, list[float]]]) -> float:
-    return sum(abs(value) for _, values in series_values for value in values)
+    if not series_values:
+        return 0.0
+    checksum = 0.0
+    if isinstance(series_values[0], tuple):
+        for series_idx, (_, values) in enumerate(series_values):
+            for value_idx, value in enumerate(values):
+                if value is None or pd.isna(value):
+                    logger.warning(
+                        '[waterfall][checksum] field="series_values[%d][%d]" was=%r -> 0.0',
+                        series_idx,
+                        value_idx,
+                        value,
+                    )
+                    continue
+                checksum += abs(float(value))
+        return checksum
+    for value_idx, value in enumerate(series_values):
+        if value is None or pd.isna(value):
+            logger.warning(
+                '[waterfall][checksum] field="values[%d]" was=%r -> 0.0',
+                value_idx,
+                value,
+            )
+            continue
+        checksum += abs(float(value))
+    return checksum
 
 
 def _chart_data_from_payload(payload: WaterfallPayload) -> ChartData:
