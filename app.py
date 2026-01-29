@@ -4040,12 +4040,13 @@ def compute_waterfall_payloads_for_all_labels(
             len(payload.categories),
             _payload_checksum(payload.series_values),
         )
-    return payloads_by_label
-out = Path("debug_waterfall_payloads.json")
-with out.open("w", encoding="utf-8") as f:
-    json.dump(payloads_by_label, f, indent=2, ensure_ascii=False)
+        out = Path("debug_waterfall_payloads.json")
+        with out.open("w", encoding="utf-8") as f:
+        json.dump(payloads_by_label, f, indent=2, ensure_ascii=False)
 
-print(f"[waterfall] wrote payload debug to: {out.resolve()}")
+        print(f"[waterfall] wrote payload debug to: {out.resolve()}")
+    return payloads_by_label
+
 
 def _add_waterfall_chart_from_template(
     slide,
@@ -5074,6 +5075,7 @@ def finalize_download(status_text, data_contents):
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 
