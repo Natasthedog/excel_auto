@@ -116,6 +116,15 @@ def bytes_from_contents(contents):
     _, content_string = contents.split(',')
     return base64.b64decode(content_string)
 
+def _json_safe(x):
+    try:
+        import numpy as np
+        if isinstance(x, (np.integer, np.floating)):
+            return float(x)
+    except Exception:
+        pass
+    return x
+
 
 def df_from_contents(contents, filename):
     decoded = bytes_from_contents(contents)
@@ -4042,7 +4051,7 @@ def compute_waterfall_payloads_for_all_labels(
         )
         out = Path("debug_waterfall_payloads.json")
         with out.open("w", encoding="utf-8") as f:
-        json.dump(payloads_by_label, f, indent=2, ensure_ascii=False)
+            json.dump(payloads_by_label, f, indent=2, ensure_ascii=False)
 
         print(f"[waterfall] wrote payload debug to: {out.resolve()}")
     return payloads_by_label
@@ -5075,6 +5084,7 @@ def finalize_download(status_text, data_contents):
 
 if __name__ == "__main__":
     app.run(debug=True)
+
 
 
 
