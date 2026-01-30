@@ -10,6 +10,7 @@ from app import _payload_checksum
 from app import compute_waterfall_payloads_for_all_labels
 from app import _waterfall_chart_from_slide
 from app import _to_jsonable
+from app import _waterfall_payloads_to_json
 from test_utils import build_test_template
 
 
@@ -153,3 +154,73 @@ def test_waterfall_payloads_are_json_serializable(tmp_path) -> None:
     serialized = json.dumps(_to_jsonable(payloads))
     parsed = json.loads(serialized)
     assert parsed["Alpha"]["categories"] == ["Base", "Change", "Total"]
+
+
+def test_waterfall_payloads_to_json(tmp_path) -> None:
+    template_path = tmp_path / "template.pptx"
+    build_test_template(template_path, waterfall_slide_count=1)
+    template_chart = _template_chart_from_path(template_path)
+
+    rows = []
+    for idx, category in enumerate(["Base", "Change", "Total"]):
+        rows.append(
+            {
+                "Target Level Label": "Alpha",
+                "Vars": category,
+                "Base": [100, 0, 110][idx],
+                "Promo": 0,
+                "Media": 0,
+                "Blanks": [0, 100, 105][idx],
+                "Positives": [0, 10, 0][idx],
+                "Negatives": [0, -5, 0][idx],
+            }
+        )
+    df = pd.DataFrame(rows)
+
+    payloads = compute_waterfall_payloads_for_all_labels(
+        df,
+        scope_df=None,
+        bucket_data=None,
+        template_chart=template_chart,
+        target_labels=["Alpha"],
+    )
+
+    serialized = _waterfall_payloads_to_json(payloads)
+    parsed = json.loads(serialized)
+    assert parsed["Alpha"]["categories"] == ["Base", "Change", "Total"]
+
+
+def test_waterfall_payloads_fill_down_target_labels(tmp_path) -> None:
+    template_path = tmp_path / "template.pptx"
+    build_test_template(template_path, waterfall_slide_count=1)
+    template_chart = _template_chart_from_path(template_path)
+
+    rows = []
+    for label, base_value in [("Alpha", 100), ("Beta", 250)]:
+        for idx, category in enumerate(["Base", "Change", "Total"]):
+            rows.append(
+                {
+                    "Target Level Label": label if idx == 0 else None,
+                    "Vars": category,
+                    "Base": [base_value, 0, base_value + 10][idx],
+                    "Promo": 0,
+                    "Media": 0,
+                    "Blanks": [0, base_value, base_value + 5][idx],
+                    "Positives": [0, 10, 0][idx],
+                    "Negatives": [0, -5, 0][idx],
+                }
+            )
+    df = pd.DataFrame(rows)
+
+    payloads = compute_waterfall_payloads_for_all_labels(
+        df,
+        scope_df=None,
+        bucket_data=None,
+        template_chart=template_chart,
+        target_labels=["Alpha", "Beta"],
+    )
+
+    alpha_base = _series_values(payloads["Alpha"], "Base")
+    beta_base = _series_values(payloads["Beta"], "Base")
+
+    assert alpha_base != beta_base

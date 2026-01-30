@@ -136,6 +136,10 @@ def _to_jsonable(value):
     return _json_safe(value)
 
 
+def _waterfall_payloads_to_json(payloads_by_label: dict[str, "WaterfallPayload"]) -> str:
+    return json.dumps(_to_jsonable(payloads_by_label), indent=2, ensure_ascii=False)
+
+
 def df_from_contents(contents, filename):
     decoded = bytes_from_contents(contents)
     if filename.lower().endswith((".xlsx", ".xls", ".xlsb")):
@@ -624,7 +628,7 @@ def _build_category_waterfall_df(
             data_start_idx = max(data_start_idx, target_idx)
             data_df = gathered_df.iloc[data_start_idx:].copy()
             normalized_target = _normalize_text_value(target_level_label)
-            target_series = data_df[target_col].map(_normalize_text_value)
+            target_series = data_df[target_col].ffill().map(_normalize_text_value)
             data_df = data_df[target_series == normalized_target]
 
     ordered_cols = [vars_col] + [series_columns[key] for key in series_candidates]
@@ -4059,11 +4063,6 @@ def compute_waterfall_payloads_for_all_labels(
             len(payload.categories),
             _payload_checksum(payload.series_values),
         )
-        out = Path("debug_waterfall_payloads.json")
-        with out.open("w", encoding="utf-8") as f:
-            json.dump(_to_jsonable(payloads_by_label), f, indent=2, ensure_ascii=False)
-
-        print(f"[waterfall] wrote payload debug to: {out.resolve()}")
     return payloads_by_label
 
 
@@ -4651,9 +4650,26 @@ app.layout = html.Div(
             },
         ),
 
-        html.Button("Generate Deck", id="go", n_clicks=0, style={"padding":"10px 16px","borderRadius":"10px"}),
+        html.Div(
+            [
+                html.Button(
+                    "Generate Deck",
+                    id="go",
+                    n_clicks=0,
+                    style={"padding": "10px 16px", "borderRadius": "10px"},
+                ),
+                html.Button(
+                    "Download Waterfall Payloads",
+                    id="download-waterfall-payloads",
+                    n_clicks=0,
+                    style={"padding": "10px 16px", "borderRadius": "10px"},
+                ),
+            ],
+            style={"display": "flex", "gap": "8px", "flexWrap": "wrap"},
+        ),
         html.Div(id="status", style={"marginTop":"10px", "color":"#888"}),
         dcc.Download(id="download"),
+        dcc.Download(id="payload-download"),
     ]
 )
 
@@ -4972,6 +4988,73 @@ def apply_bucket_selection(
         "target_labels": selected_target_labels,
     }
     return bucket_config, bucket_data, f"Applied {len(values)} bucket delta(s) to the waterfall."
+
+
+@callback(
+    Output("payload-download", "data"),
+    Output("status", "children", allow_duplicate=True),
+    Input("download-waterfall-payloads", "n_clicks"),
+    State("data-upload", "contents"),
+    State("data-upload", "filename"),
+    State("scope-upload", "contents"),
+    State("scope-upload", "filename"),
+    State("project-select", "value"),
+    State("waterfall-targets", "value"),
+    State("bucket-deltas", "data"),
+    prevent_initial_call=True,
+)
+def download_waterfall_payloads(
+    n_clicks,
+    data_contents,
+    data_name,
+    scope_contents,
+    scope_name,
+    project_name,
+    waterfall_targets,
+    bucket_data,
+):
+    if not data_contents or not project_name:
+        return no_update, "Please upload the data file and select a project."
+
+    template_path = PROJECT_TEMPLATES.get(project_name)
+    if not template_path or not template_path.exists():
+        return no_update, "The selected project template could not be found."
+
+    try:
+        gathered_df = df_from_contents(data_contents, data_name)
+        scope_df = None
+        if scope_contents:
+            try:
+                scope_df = scope_df_from_contents(scope_contents, scope_name)
+            except Exception:
+                scope_df = None
+
+        prs = Presentation(io.BytesIO(template_path.read_bytes()))
+        available_slides = _available_waterfall_template_slides(prs)
+        if not available_slides:
+            return no_update, "Could not find the <Waterfall Template> slide in the template."
+        template_chart = _waterfall_chart_from_slide(
+            available_slides[0][1],
+            "Waterfall Template",
+        )
+        if template_chart is None:
+            return no_update, "Could not find the waterfall chart on the <Waterfall Template> slide."
+
+        payloads_by_label = compute_waterfall_payloads_for_all_labels(
+            gathered_df,
+            scope_df,
+            bucket_data,
+            template_chart,
+            target_labels=waterfall_targets,
+        )
+        payload_json = _waterfall_payloads_to_json(payloads_by_label)
+        return dcc.send_string(payload_json, "waterfall_payloads.json"), "Prepared waterfall payload JSON."
+    except Exception as exc:
+        logger.exception("Waterfall payload JSON generation failed.")
+        message = str(exc).strip()
+        if not message:
+            message = "Unknown error. Check server logs for details."
+        return no_update, f"Error ({type(exc).__name__}): {message}"
 
 
 @callback(
