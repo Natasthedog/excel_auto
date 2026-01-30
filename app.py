@@ -628,7 +628,7 @@ def _build_category_waterfall_df(
             data_start_idx = max(data_start_idx, target_idx)
             data_df = gathered_df.iloc[data_start_idx:].copy()
             normalized_target = _normalize_text_value(target_level_label)
-            target_series = data_df[target_col].map(_normalize_text_value)
+            target_series = data_df[target_col].ffill().map(_normalize_text_value)
             data_df = data_df[target_series == normalized_target]
 
     ordered_cols = [vars_col] + [series_columns[key] for key in series_candidates]
